@@ -1,0 +1,36 @@
+name: Plugin checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.2', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, pdo_sqlite
+          coverage: none
+      - name: PHP syntax
+        run: find . -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l
+      - name: Behavioral regression tests (HTTP mocked)
+        run: php tests/run.php
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Distribution tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build installable plugin
+        run: python scripts/package.py
+      - uses: actions/upload-artifact@v4
+        if: matrix.php == '8.4'
+        with:
+          name: ava-WooCommerce-plugin
+          path: build/*

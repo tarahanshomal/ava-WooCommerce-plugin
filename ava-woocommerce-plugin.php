@@ -1,0 +1,60 @@
+<?php
+/**
+ * Plugin Name: Ava WooCommerce SMS
+ * Plugin URI: https://github.com/tarahanshomal/ava-WooCommerce-plugin
+ * Description: اطلاع‌رسانی پیامکی سفارش‌های ووکامرس با سرویس آوا؛ قالب فارسی، ارسال غیرهم‌زمان و گزارش وضعیت.
+ * Version: 1.0.0
+ * Author: طراحان شمال
+ * Author URI: https://github.com/tarahanshomal
+ * License: GPL-2.0-or-later
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ * Text Domain: ava-woocommerce-plugin
+ * Domain Path: /languages
+ * Requires at least: 6.5
+ * Requires PHP: 7.4
+ * Requires Plugins: woocommerce
+ * WC requires at least: 8.2
+ * WC tested up to: 11.2.1
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+define( 'AVA_WOO_VERSION', '1.0.0' );
+define( 'AVA_WOO_FILE', __FILE__ );
+define( 'AVA_WOO_PATH', plugin_dir_path( __FILE__ ) );
+
+foreach ( array( 'phone', 'template', 'settings', 'api', 'queue', 'notifications', 'admin' ) as $ava_woo_class ) {
+    require_once AVA_WOO_PATH . 'includes/class-' . $ava_woo_class . '.php';
+}
+unset( $ava_woo_class );
+
+register_activation_hook( __FILE__, array( 'AvaWoo\\Queue', 'install' ) );
+register_deactivation_hook( __FILE__, array( 'AvaWoo\\Queue', 'deactivate' ) );
+
+add_action( 'before_woocommerce_init', static function () {
+    if ( class_exists( '\\Automattic\\WooCommerce\\Utilities\\FeaturesUtil' ) ) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', AVA_WOO_FILE, true );
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'cart_checkout_blocks', AVA_WOO_FILE, true );
+    }
+} );
+
+add_action( 'plugins_loaded', static function () {
+    if ( ! class_exists( 'WooCommerce' ) || version_compare( WC_VERSION, '8.2', '<' ) ) {
+        add_action( 'admin_notices', static function () {
+            if ( current_user_can( 'activate_plugins' ) ) {
+                echo '<div class="notice notice-warning"><p>' . esc_html__( 'پیامک آوا به ووکامرس نسخهٔ ۸٫۲ یا جدیدتر نیاز دارد.', 'ava-woocommerce-plugin' ) . '</p></div>';
+            }
+        } );
+        return;
+    }
+    \AvaWoo\Queue::init();
+    \AvaWoo\Notifications::init();
+    if ( is_admin() ) {
+        \AvaWoo\Admin::init();
+    }
+} );
+
+add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), static function ( $links ) {
+    array_unshift( $links, '<a href="' . esc_url( admin_url( 'admin.php?page=ava-woo-sms' ) ) . '">' . esc_html__( 'تنظیمات', 'ava-woocommerce-plugin' ) . '</a>' );
+    return $links;
+} );

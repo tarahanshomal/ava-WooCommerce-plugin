@@ -1,0 +1,43 @@
+name: Publish plugin ZIP
+on:
+  push:
+    tags: ['v*']
+  release:
+    types: [published]
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, pdo_sqlite
+          coverage: none
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: PHP syntax
+        run: find . -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l
+      - name: Behavioral regression tests (HTTP mocked)
+        run: php tests/run.php
+      - name: Distribution tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build versioned ZIP and checksum
+        run: python scripts/package.py --tag "$RELEASE_TAG"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" build/*.zip build/*.sha256 --clobber
+          else
+            gh release create "$RELEASE_TAG" build/*.zip build/*.sha256 --verify-tag --title "Ava WooCommerce $RELEASE_TAG" --generate-notes
+          fi

@@ -1,0 +1,9 @@
+/build/
+/vendor/
+.env
+.env.*
+*.log
+*.zip
+__pycache__/
+.phpunit.cache/
+.DS_Store
