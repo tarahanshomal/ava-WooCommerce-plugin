@@ -5,7 +5,7 @@ Requires at least: 6.5
 Tested up to: 7.1.4
 Requires PHP: 7.4
 Requires Plugins: woocommerce
-Stable tag: 1.0.0
+Stable tag: 1.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -21,6 +21,7 @@ License URI: https://www.gnu.org/licenses/gpl-2.0.html
 * ارسال دستی از سفارش و ارسال آزمایشی با تأیید هزینه.
 * ارسال در پس‌زمینه و گزارش وضعیت؛ جلوگیری از ثبت تکراری اعلان خودکار.
 * رابط فارسی، شمارهٔ ایرانی، WooCommerce CRUD و سازگاری HPOS.
+* نمایش موجودی قابل مصرف، موجودی کل و اعتبار رزروشدهٔ حساب آوا به ریال، همراه تازه‌سازی و پیوند شارژ.
 
 اعلان سفارش تازه مربوط به تسویه‌حساب کلاسیک و بلوکی است؛ سفارش‌های مدیریت یا REST API فقط اعلان وضعیت‌های انتخاب‌شده را دریافت می‌کنند. قالب مدیر برای سفارش تازه و وضعیت‌های منتخب مشترک است.
 
@@ -28,10 +29,10 @@ License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
 = External service: Ava SMS =
 
-The plugin sends requests to the HTTPS Ava panel URL selected by the merchant, defaulting to https://ava.tarpardaz.com. A send request contains the recipient phone number, rendered message, optional sender, Bearer API token and idempotency key. Message templates can include customer and order fields. Report requests retrieve message status using the same service account. Requests happen when enabled order notifications, administrator-confirmed manual messages or paid test messages are processed. The merchant must have an Ava account and should review the service terms and privacy information in their Ava panel before enabling this integration.
+The plugin sends requests to the HTTPS Ava panel URL selected by the merchant, defaulting to https://ava.tarpardaz.com. A send request contains the recipient phone number, rendered message, optional sender, Bearer API token and idempotency key. Message templates can include customer and order fields. Report requests retrieve message status using the same service account. Opening the settings page or explicitly refreshing the balance also sends a read-only authenticated wallet request without customer or message data. Wallet amounts are cached locally for up to sixty seconds per URL/key combination. Requests otherwise happen when enabled order notifications, administrator-confirmed manual messages or paid test messages are processed. The merchant must have an Ava account and should review the service terms and privacy information in their Ava panel before enabling this integration.
 
 Service: https://ava.tarpardaz.com
-API: POST /api/v1/sms and GET /api/v1/sms/{id}
+API: POST /api/v1/sms, GET /api/v1/sms/{id} and GET /api/v1/wallet
 Local logs contain message text and recipient phone, with a default retention of 30 days. Queued and provider-accepted statuses do not mean a message was delivered.
 
 == Installation ==
@@ -65,11 +66,26 @@ No. Leave the field blank to keep the existing key. The key is stored in the Wor
 
 == Changelog ==
 
+= 1.1.0 =
+* Display real available, total and reserved Ava account credit in rials, even when automatic SMS is disabled.
+* Cache wallet reads for sixty seconds per origin/key, offer protected manual refresh and an account charge link, and show safe errors instead of an invented balance.
+
+= 1.0.1 =
+* Distinguish pending content review, credit, capacity and configuration from the active send queue.
+* Keep read-only message reports running after delayed approval; recover lost scheduled reports without resending SMS.
+* Preserve unresolved records during retention cleanup and keep delivery/report metadata through additive schema migration.
+
 = 1.0.0 =
 * Initial Ava SMS integration for WooCommerce: customer/admin notifications, editable text templates, asynchronous sending, explicit manual/test sends and status reports.
 * Iranian phone normalization, idempotency, permission/nonces and HPOS-compatible order access.
 
 == Upgrade Notice ==
+
+= 1.1.0 =
+View your Ava wallet in the settings page. Existing sending keys work; a dedicated wallet:read key can also read the balance. Reading or refreshing credit does not send an SMS.
+
+= 1.0.1 =
+Install to restore durable message reporting and accurate waiting states. Requires regular WordPress cron. Previously admitted Ava messages are reported without resending them.
 
 = 1.0.0 =
 Initial release. Configure your own Ava API key and enable notifications after installation.

@@ -4,7 +4,7 @@ namespace AvaWoo;
 defined( 'ABSPATH' ) || exit;
 
 final class Queue {
-    const SCHEMA = '1.0.0';
+    const SCHEMA = '1.0.1';
     const GROUP = 'ava-woocommerce';
 
     public static function table() {
@@ -29,6 +29,13 @@ final class Queue {
             sender varchar(64) NOT NULL DEFAULT '',
             status varchar(24) NOT NULL DEFAULT 'pending',
             provider_id varchar(100) NOT NULL DEFAULT '',
+            review_status varchar(64) NOT NULL DEFAULT '',
+            campaign_status varchar(64) NOT NULL DEFAULT '',
+            requires_review tinyint(1) NOT NULL DEFAULT 0,
+            dispatch_state varchar(64) NOT NULL DEFAULT '',
+            dispatch_detail varchar(240) NOT NULL DEFAULT '',
+            report_due bigint(20) unsigned NOT NULL DEFAULT 0,
+            report_attempts bigint(20) unsigned NOT NULL DEFAULT 0,
             detail text NOT NULL,
             created_at datetime NOT NULL,
             updated_at datetime NOT NULL,
@@ -36,6 +43,7 @@ final class Queue {
             UNIQUE KEY event_key (event_key),
             KEY order_id (order_id),
             KEY status (status),
+            KEY report_due (report_due),
             KEY created_at (created_at)
         ) {$charset};" );
         update_option( 'ava_woo_schema', self::SCHEMA, false );
@@ -152,10 +160,12 @@ final class Queue {
             self::update( $id, array( 'status' => ! empty( $data['uncertain'] ) ? 'unknown' : 'failed', 'detail' => $result->get_error_message() ) );
             return;
         }
-        $status = self::provider_status( $result['status'] );
-        self::update( $id, array( 'status' => $status, 'provider_id' => $result['id'], 'detail' => 'در آوا ثبت شد؛ ثبت یا پذیرش به معنی تحویل به گیرنده نیست.' ) );
+        $values = self::report_values( $result );
+        $status = $values['status'];
+        $values['provider_id'] = $result['id'];
+        self::update( $id, $values );
         if ( ! self::terminal( $status ) ) {
-            self::schedule( 'ava_woo_report', array( $id, 0 ), 60 );
+            self::schedule_report( $id, 0, 60 );
         }
     }
 
@@ -163,12 +173,53 @@ final class Queue {
         return $job->api_url === Settings::valid_url( $settings['api_url'] ) && hash_equals( $job->key_fingerprint, hash( 'sha256', $settings['api_key'] ) );
     }
 
-    private static function provider_status( $status ) {
-        $known = array( 'pending', 'sending', 'unknown', 'accepted', 'sent', 'delivered', 'undelivered', 'rejected', 'blocked', 'cancelled', 'simulated', 'expired' );
+    private static function provider_status( $status, $report = array() ) {
+        $known = array( 'pending', 'queued', 'sending', 'unknown', 'accepted', 'sent', 'delivered', 'undelivered', 'rejected', 'blocked', 'cancelled', 'simulated', 'expired' );
         if ( 'pending' === $status ) {
+            $dispatch = $report['dispatch_state'] ?? '';
+            if ( 'review_rejected' === $dispatch || 'rejected' === ( $report['review_status'] ?? '' ) ) {
+                return 'rejected';
+            }
+            $waiting = array( 'awaiting_review', 'awaiting_dispatch', 'credit_blocked', 'waiting_capacity', 'awaiting_configuration', 'blocked', 'awaiting_start', 'paused', 'scheduled', 'queued' );
+            if ( in_array( $dispatch, $waiting, true ) ) {
+                // A pre-dispatch block may clear; keep reporting it, without resending.
+                return 'blocked' === $dispatch ? 'dispatch_blocked' : $dispatch;
+            }
+            if ( ! empty( $report['requires_review'] ) ) {
+                return 'awaiting_review';
+            }
             return 'queued';
         }
         return in_array( $status, $known, true ) ? $status : 'unknown';
+    }
+
+    private static function report_values( $report ) {
+        $status = self::provider_status( $report['status'], $report );
+        $details = array(
+            'awaiting_review' => 'در آوا ثبت شد و منتظر تأیید محتواست؛ هنوز وارد صف ارسال نشده است.',
+            'awaiting_dispatch' => 'محتوا تأیید شد؛ آوا در حال آماده‌سازی ارسال است.',
+            'awaiting_start' => 'محتوا آماده است؛ شروع ارسال باید در پنل آوا انجام شود.',
+            'credit_blocked' => 'ارسال منتظر افزایش اعتبار حساب آواست؛ درخواست دوباره ارسال نمی‌شود.',
+            'waiting_capacity' => 'ارسال منتظر ظرفیت مجاز حساب آواست.',
+            'awaiting_configuration' => 'ارسال منتظر آماده‌شدن اتصال پیامک آواست.',
+            'dispatch_blocked' => 'آوا ارسال را پیش از ارسال به اپراتور متوقف کرده است؛ وضعیت حساب و محتوا را در پنل آوا بررسی کنید.',
+            'paused' => 'ارسال در آوا متوقف شده است؛ ادامه را در پنل آوا بررسی کنید.',
+            'scheduled' => 'ارسال برای زمان تعیین‌شده در آوا برنامه‌ریزی شده است.',
+            'rejected' => 'درخواست پیامک در آوا رد شد؛ دلیل را در پنل آوا بررسی کنید.',
+        );
+        $values = array( 'status' => $status, 'detail' => $details[ $status ] ?? 'وضعیت از آوا دریافت شد؛ فقط «تحویل‌شده» تأیید تحویل است.' );
+        foreach ( array( 'review_status', 'campaign_status', 'dispatch_state' ) as $field ) {
+            $values[ $field ] = $report[ $field ] ?? '';
+        }
+        $values['requires_review'] = ! empty( $report['requires_review'] ) ? 1 : 0;
+        $values['dispatch_detail'] = $report['dispatch_detail'] ?? ( $report['detail'] ?? '' );
+        return $values;
+    }
+
+    private static function schedule_report( $id, $attempt, $delay ) {
+        $delay = max( 1, min( HOUR_IN_SECONDS, (int) $delay ) );
+        self::update( $id, array( 'report_due' => time() + $delay, 'report_attempts' => $attempt ) );
+        return self::schedule( 'ava_woo_report', array( (int) $id, (int) $attempt ), $delay );
     }
 
     private static function terminal( $status ) {
@@ -199,16 +250,29 @@ final class Queue {
         if ( $report['id'] !== $job->provider_id ) {
             return new \WP_Error( 'ava_report_mismatch', __( 'شناسهٔ گزارش آوا با پیامک مطابقت ندارد.', 'ava-woocommerce-plugin' ) );
         }
-        $report['status'] = self::provider_status( $report['status'] );
-        self::update( $job->id, array( 'status' => $report['status'], 'detail' => 'وضعیت از گزارش آوا دریافت شد؛ فقط «تحویل‌شده» تأیید تحویل است.' ) );
+        $values = self::report_values( $report );
+        $report['status'] = $values['status'];
+        if ( self::terminal( $report['status'] ) ) {
+            $values['report_due'] = 0;
+        }
+        self::update( $job->id, $values );
         return $report;
     }
 
     public static function poll( $id, $attempt = 0 ) {
+        global $wpdb;
+        $job = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE id = %d', absint( $id ) ) );
+        if ( ! $job || '' === $job->provider_id || self::terminal( $job->status ) ) {
+            return;
+        }
+        // Ignore an obsolete scheduled generation after another poll made progress.
         $attempt = absint( $attempt );
+        if ( $attempt !== (int) $job->report_attempts ) {
+            return;
+        }
         $report = self::refresh( $id );
-        if ( $attempt < 5 && ( is_wp_error( $report ) || ! self::terminal( $report['status'] ) ) ) {
-            self::schedule( 'ava_woo_report', array( absint( $id ), $attempt + 1 ), min( HOUR_IN_SECONDS, 120 * ( 2 ** $attempt ) ) );
+        if ( is_wp_error( $report ) || ! self::terminal( $report['status'] ) ) {
+            self::schedule_report( $id, $attempt + 1, min( HOUR_IN_SECONDS, 120 * ( 2 ** min( 5, $attempt ) ) ) );
         }
     }
 
@@ -222,6 +286,15 @@ final class Queue {
         foreach ( $pending as $id ) {
             self::schedule( 'ava_woo_send', array( (int) $id ) );
         }
+        // Restore lost report actions, including jobs admitted by earlier versions.
+        // Each batch is bounded; only read-only GET requests are scheduled here.
+        $reports = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE provider_id != '' AND status NOT IN ('delivered','undelivered','rejected','blocked','cancelled','simulated','expired','failed') AND report_due <= %d ORDER BY report_due ASC, id ASC LIMIT 100", time() ) );
+        foreach ( $reports as $id ) {
+            $job = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", (int) $id ) );
+            if ( $job ) {
+                self::schedule_report( $id, (int) $job->report_attempts, 1 );
+            }
+        }
         self::cleanup();
     }
 
@@ -230,6 +303,6 @@ final class Queue {
         $settings = Settings::get();
         $days = max( 1, min( 90, absint( $settings['retention_days'] ) ) );
         $table = self::table();
-        $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE created_at < %s", gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) );
+        $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE created_at < %s AND status IN ('delivered','undelivered','rejected','blocked','cancelled','simulated','expired','failed')", gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) );
     }
 }

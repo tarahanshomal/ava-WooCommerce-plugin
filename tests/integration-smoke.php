@@ -68,6 +68,13 @@ $settings_before = Settings::get();
 $sanitized = Settings::sanitize(array_merge($settings, ['api_key' => '']));
 ava_check($sanitized['api_key'] === $settings['api_key'], 'Blank API key preserves saved credential');
 
+$wallet_reads = 0;
+$GLOBALS['ava_integration_http'] = static function($request, $url) use (&$wallet_reads, $settings) {
+    ava_check('https://ava-integration.invalid/api/v1/wallet' === $url && 'GET' === $request['method'], 'Admin wallet performs a read-only request at the synthetic origin');
+    ava_check($request['headers']['Authorization'] === 'Bearer ' . $settings['api_key'] && !isset($request['body']), 'Wallet uses the current key without sending message data');
+    ++$wallet_reads;
+    return ['headers' => [], 'body' => json_encode(['balance_irr' => 1234567, 'held_irr' => 4567, 'available_irr' => 1230000, 'currency' => 'IRR']), 'response' => ['code' => 200, 'message' => 'OK'], 'cookies' => []];
+};
 foreach (['settings', 'send', 'logs'] as $tab) {
     $_GET['tab'] = $tab;
     ob_start();
@@ -75,7 +82,15 @@ foreach (['settings', 'send', 'logs'] as $tab) {
     $html = ob_get_clean();
     ava_check(strpos($html, 'پیامک آوا') !== false && strlen($html) > 1000, "Admin {$tab} screen renders");
     ava_check(strpos($html, $settings['api_key']) === false, "Admin {$tab} screen does not reveal API key");
+    if ('settings' === $tab) {
+        ava_check(strpos($html, 'ماندهٔ قابل مصرف') !== false && strpos($html, '۱٬۲۳۰٬۰۰۰') !== false, 'Wallet renders the exact available rials');
+        ava_check(strpos($html, 'ava_woo_wallet_refresh') !== false && strpos($html, 'https://ava-integration.invalid/panel#wallet') !== false, 'Wallet provides a nonce refresh form and correct charge destination');
+    }
 }
+ava_check(1 === $wallet_reads, 'Only the settings page reads the wallet');
+$cached_wallet = \AvaWoo\Api::wallet();
+ava_check(1 === $wallet_reads && 1230000 === $cached_wallet['available_irr'], 'WordPress transient caches the validated wallet snapshot');
+unset($GLOBALS['ava_integration_http']);
 
 $order = wc_create_order();
 $order->set_billing_first_name('مشتری');
@@ -153,7 +168,7 @@ update_option('ava_woo_settings', $settings);
 $invalid = Queue::enqueue('not-a-phone', 'Synthetic invalid', 'invalid-' . $mode, 0, 'test');
 ava_check(is_wp_error($invalid), 'Invalid phone cannot enter queue');
 
-$wpdb->query($wpdb->prepare('UPDATE ' . Queue::table() . ' SET created_at=%s WHERE order_id=%d', gmdate('Y-m-d H:i:s', time()-35*DAY_IN_SECONDS), $oid));
+$wpdb->query($wpdb->prepare("UPDATE " . Queue::table() . " SET created_at=%s,status='delivered' WHERE order_id=%d", gmdate('Y-m-d H:i:s', time()-35*DAY_IN_SECONDS), $oid));
 Queue::cleanup();
 ava_check(ava_count($oid) === 0, 'Retention removes expired sensitive message payload');
 $order = wc_get_order($oid);

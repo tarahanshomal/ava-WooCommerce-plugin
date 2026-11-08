@@ -2,6 +2,8 @@ name: Publish plugin ZIP
 on:
   push:
     tags: ['v*']
+    branches: ['main']
+    paths: ['ava-woocommerce-plugin.php', '.github/workflows/release.yml']
   release:
     types: [published]
 concurrency:
@@ -13,9 +15,25 @@ jobs:
   release:
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+      REQUESTED_RELEASE_TAG: ${{ github.event.release.tag_name || (github.ref_type == 'tag' && github.ref_name) || '' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Determine and validate release version
+        env:
+          PLUGIN_MAIN_FILE: ava-woocommerce-plugin.php
+        run: |
+          python3 - <<'PYVERSION'
+          import os, re
+          from pathlib import Path
+          text = Path(os.environ['PLUGIN_MAIN_FILE']).read_text()
+          version = re.search(r'^\s*\*?\s*Version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$', text, re.MULTILINE).group(1)
+          tag = 'v' + version
+          requested = os.environ.get('REQUESTED_RELEASE_TAG', '')
+          if requested and requested != tag:
+              raise SystemExit('Release tag does not match plugin version')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('RELEASE_TAG=' + tag + '\n')
+          PYVERSION
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
@@ -39,5 +57,5 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" build/*.zip build/*.sha256 --clobber
           else
-            gh release create "$RELEASE_TAG" build/*.zip build/*.sha256 --verify-tag --title "Ava WooCommerce $RELEASE_TAG" --generate-notes
+            gh release create "$RELEASE_TAG" build/*.zip build/*.sha256 --target "$GITHUB_SHA" --title "Ava WooCommerce $RELEASE_TAG" --generate-notes
           fi

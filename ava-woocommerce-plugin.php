@@ -3,7 +3,7 @@
  * Plugin Name: Ava WooCommerce SMS
  * Plugin URI: https://github.com/tarahanshomal/ava-WooCommerce-plugin
  * Description: اطلاع‌رسانی پیامکی سفارش‌های ووکامرس با سرویس آوا؛ قالب فارسی، ارسال غیرهم‌زمان و گزارش وضعیت.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: طراحان شمال
  * Author URI: https://github.com/tarahanshomal
  * License: GPL-2.0-or-later
@@ -19,7 +19,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'AVA_WOO_VERSION', '1.0.0' );
+define( 'AVA_WOO_VERSION', '1.1.0' );
 define( 'AVA_WOO_FILE', __FILE__ );
 define( 'AVA_WOO_PATH', plugin_dir_path( __FILE__ ) );
 

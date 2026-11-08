@@ -17,6 +17,7 @@ final class Admin {
 		add_action( 'admin_post_ava_woo_test', array( __CLASS__, 'test_send' ) );
 		add_action( 'admin_post_ava_woo_manual', array( __CLASS__, 'manual_send' ) );
 		add_action( 'admin_post_ava_woo_refresh', array( __CLASS__, 'refresh' ) );
+		add_action( 'admin_post_ava_woo_wallet_refresh', array( __CLASS__, 'wallet_refresh' ) );
 		add_action( 'add_meta_boxes', array( __CLASS__, 'metabox' ) );
 	}
 
@@ -36,7 +37,7 @@ final class Admin {
 		if ( 'woocommerce_page_' . self::PAGE !== $hook ) {
 			return;
 		}
-		wp_enqueue_style( 'ava-woo-admin', plugins_url( 'assets/admin.css', dirname( __DIR__ ) . '/ava-woocommerce-plugin.php' ), array(), '1.0.0' );
+		wp_enqueue_style( 'ava-woo-admin', plugins_url( 'assets/admin.css', dirname( __DIR__ ) . '/ava-woocommerce-plugin.php' ), array(), AVA_WOO_VERSION );
 	}
 
 	private static function authorize( $nonce ) {
@@ -104,6 +105,12 @@ final class Admin {
 		self::finish( is_wp_error( $result ) ? $result : 'گزارش پیامک از آوا دریافت شد.', 'logs' );
 	}
 
+	public static function wallet_refresh() {
+		self::authorize( 'ava_woo_wallet_refresh' );
+		$result = Api::wallet( true );
+		self::finish( is_wp_error( $result ) ? $result : 'موجودی حساب آوا تازه‌سازی شد.', 'settings' );
+	}
+
 	public static function page() {
 		if ( ! current_user_can( 'manage_woocommerce' ) ) {
 			return;
@@ -154,6 +161,7 @@ final class Admin {
 
 	private static function settings_form( $s ) {
 		$statuses = wc_get_order_statuses();
+		self::wallet_card( $s );
 		?>
 		<form method="post" action="<?php echo esc_url( admin_url( 'options.php' ) ); ?>">
 			<?php settings_fields( 'ava_woo' ); ?>
@@ -197,6 +205,30 @@ final class Admin {
 		<?php
 	}
 
+	private static function wallet_card( $s ) {
+		$wallet = Api::wallet( false, $s );
+		$origin = Settings::valid_url( $s['api_url'] );
+		?>
+		<section class="ava-woo-card ava-woo-wallet" aria-labelledby="ava-woo-wallet-title">
+			<h2 id="ava-woo-wallet-title">موجودی حساب پیامکی آوا</h2>
+			<?php if ( is_wp_error( $wallet ) ) : ?>
+				<p class="ava-woo-callout" role="status"><?php echo esc_html( $wallet->get_error_message() ); ?></p>
+			<?php else : ?>
+				<p class="ava-woo-wallet-available"><span>ماندهٔ قابل مصرف</span><strong dir="ltr"><?php echo esc_html( self::rial( $wallet['available_irr'] ) ); ?></strong><span>ریال</span></p>
+				<dl class="ava-woo-wallet-details"><div><dt>موجودی کل</dt><dd><?php echo esc_html( self::rial( $wallet['balance_irr'] ) ); ?> ریال</dd></div><div><dt>اعتبار رزروشده</dt><dd><?php echo esc_html( self::rial( $wallet['held_irr'] ) ); ?> ریال</dd></div></dl>
+				<p class="description">آخرین دریافت: <?php echo esc_html( wp_date( 'Y/m/d H:i:s', $wallet['checked_at'] ) ); ?> · ماندهٔ قابل مصرف برابر موجودی کل منهای اعتبار رزروشده است.</p>
+			<?php endif; ?>
+			<div class="ava-woo-wallet-actions"><form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"><input type="hidden" name="action" value="ava_woo_wallet_refresh"><?php wp_nonce_field( 'ava_woo_wallet_refresh' ); ?><button type="submit" class="button">تازه‌سازی موجودی</button></form><?php if ( $origin ) : ?><a class="button button-primary" href="<?php echo esc_url( $origin . '/panel#wallet' ); ?>" target="_blank" rel="noopener noreferrer">شارژ حساب آوا</a><?php endif; ?></div>
+			<p class="description">موجودی حداکثر ۶۰ ثانیه ذخیره می‌شود. مشاهده و تازه‌سازی موجودی رایگان است.</p>
+		</section>
+		<?php
+	}
+
+	/** Format integer rials without converting large balances to a float. */
+	private static function rial( $amount ) {
+		return strtr( preg_replace( '/\B(?=(\d{3})+(?!\d))/', '٬', (string) $amount ), array( '0' => '۰', '1' => '۱', '2' => '۲', '3' => '۳', '4' => '۴', '5' => '۵', '6' => '۶', '7' => '۷', '8' => '۸', '9' => '۹' ) );
+	}
+
 	private static function send_form() {
 		$order_id = isset( $_GET['order_id'] ) && is_scalar( $_GET['order_id'] ) ? absint( $_GET['order_id'] ) : 0;
 		$order = $order_id ? wc_get_order( $order_id ) : false;
@@ -237,7 +269,7 @@ final class Admin {
 	}
 
 	private static function status_label( $status ) {
-		$labels = array( 'pending' => 'در صف فروشگاه', 'processing' => 'در حال ثبت', 'sending' => 'در حال ارسال آوا', 'queued' => 'در صف آوا', 'accepted' => 'پذیرفته‌شده', 'submitted' => 'ثبت‌شده', 'sent' => 'ارسال‌شده', 'delivered' => 'تحویل‌شده', 'undelivered' => 'تحویل‌نشده', 'failed' => 'ناموفق', 'rejected' => 'ردشده', 'blocked' => 'مسدودشده', 'unknown' => 'نتیجه نامشخص', 'cancelled' => 'لغوشده', 'simulated' => 'شبیه‌سازی‌شده', 'expired' => 'منقضی‌شده', 'partial' => 'نتیجه جزئی' );
+			$labels = array( 'pending' => 'در صف فروشگاه', 'processing' => 'در حال ثبت', 'awaiting_review' => 'منتظر تأیید محتوا', 'awaiting_dispatch' => 'در حال آماده‌سازی ارسال', 'awaiting_start' => 'منتظر شروع در آوا', 'credit_blocked' => 'منتظر افزایش اعتبار', 'waiting_capacity' => 'منتظر ظرفیت ارسال', 'awaiting_configuration' => 'منتظر اتصال پیامک', 'dispatch_blocked' => 'ارسال متوقف شده', 'paused' => 'متوقف در آوا', 'scheduled' => 'زمان‌بندی‌شده', 'sending' => 'در حال ارسال آوا', 'queued' => 'در صف آوا', 'accepted' => 'پذیرفته‌شده', 'submitted' => 'ثبت‌شده', 'sent' => 'ارسال‌شده', 'delivered' => 'تحویل‌شده', 'undelivered' => 'تحویل‌نشده', 'failed' => 'ناموفق', 'rejected' => 'ردشده', 'blocked' => 'مسدودشده', 'unknown' => 'نتیجه نامشخص', 'cancelled' => 'لغوشده', 'simulated' => 'شبیه‌سازی‌شده', 'expired' => 'منقضی‌شده', 'partial' => 'نتیجه جزئی' );
 		return isset( $labels[ $status ] ) ? $labels[ $status ] : $status;
 	}
 
@@ -246,7 +278,7 @@ final class Admin {
 		$table = Queue::table();
 		$page = isset( $_GET['paged'] ) && is_scalar( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
 		$filter = isset( $_GET['status'] ) && is_string( $_GET['status'] ) ? sanitize_key( wp_unslash( $_GET['status'] ) ) : '';
-		$allowed = array( '', 'pending', 'processing', 'queued', 'sending', 'accepted', 'sent', 'delivered', 'undelivered', 'failed', 'unknown', 'rejected', 'blocked', 'cancelled', 'simulated', 'expired' );
+			$allowed = array( '', 'pending', 'processing', 'awaiting_review', 'awaiting_dispatch', 'awaiting_start', 'credit_blocked', 'waiting_capacity', 'awaiting_configuration', 'dispatch_blocked', 'paused', 'scheduled', 'queued', 'sending', 'accepted', 'sent', 'delivered', 'undelivered', 'failed', 'unknown', 'rejected', 'blocked', 'cancelled', 'simulated', 'expired' );
 		if ( ! in_array( $filter, $allowed, true ) ) {
 			$filter = '';
 		}

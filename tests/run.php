@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 define('ABSPATH', __DIR__ . '/fixtures/wordpress/');
-define('AVA_WOO_VERSION', '1.0.0');
+define('AVA_WOO_VERSION', '1.1.0');
 define('MINUTE_IN_SECONDS', 60);
 define('HOUR_IN_SECONDS', 3600);
 define('DAY_IN_SECONDS', 86400);
@@ -40,8 +40,8 @@ function wp_die($message, $title = '', $args = array()) { throw new AvaTestStop(
 function check_admin_referer($nonce) { $GLOBALS['ava_test_nonce_checks'][] = $nonce; if (!$GLOBALS['ava_test_valid_nonce']) { throw new AvaTestStop('bad_nonce'); } return true; }
 function wp_unslash($value) { return stripslashes($value); }
 function get_current_user_id() { return 7; }
-function set_transient($name, $value, $expires = 0) { $GLOBALS['ava_test_transients'][$name] = $value; return true; }
-function get_transient($name) { return $GLOBALS['ava_test_transients'][$name] ?? false; }
+function set_transient($name, $value, $expires = 0) { $GLOBALS['ava_test_transients'][$name] = $value; $GLOBALS['ava_test_transient_expirations'][$name] = $expires ? time() + $expires : 0; return true; }
+function get_transient($name) { if (($GLOBALS['ava_test_transient_expirations'][$name] ?? 0) && $GLOBALS['ava_test_transient_expirations'][$name] <= time()) { return false; } return $GLOBALS['ava_test_transients'][$name] ?? false; }
 function delete_transient($name) { unset($GLOBALS['ava_test_transients'][$name]); return true; }
 function wp_safe_redirect($url) { $GLOBALS['ava_test_redirect'] = $url; throw new AvaTestStop('redirect'); }
 function admin_url($path = '') { return 'https://store.example.com/wp-admin/' . $path; }
@@ -57,6 +57,7 @@ function settings_fields($group) { echo '<input type="hidden" name="option_page"
 function settings_errors($setting) {}
 function submit_button($text = 'Save', $type = 'primary', $name = 'submit', $wrap = true) { echo '<button type="submit">' . esc_html($text) . '</button>'; }
 function wp_nonce_field($action) { echo '<input type="hidden" name="_wpnonce" value="synthetic_nonce">'; }
+function wp_date($format, $timestamp) { return gmdate($format, $timestamp); }
 
 
 function add_settings_error($setting, $code, $message, $type = 'error') { $GLOBALS['ava_test_settings_errors'][] = array($setting, $code, $message, $type); }
@@ -95,7 +96,7 @@ final class AvaTestWpdb {
     public function __construct() {
         $this->db = new PDO('sqlite::memory:');
         $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $this->db->exec("CREATE TABLE wp_ava_woo_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, order_id INTEGER, audience TEXT, phone TEXT, message TEXT, api_url TEXT, key_fingerprint TEXT, sender TEXT, status TEXT, provider_id TEXT NOT NULL DEFAULT '', detail TEXT, created_at TEXT, updated_at TEXT)");
+        $this->db->exec("CREATE TABLE wp_ava_woo_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, order_id INTEGER, audience TEXT, phone TEXT, message TEXT, api_url TEXT, key_fingerprint TEXT, sender TEXT, status TEXT, provider_id TEXT NOT NULL DEFAULT '', review_status TEXT NOT NULL DEFAULT '', campaign_status TEXT NOT NULL DEFAULT '', requires_review INTEGER NOT NULL DEFAULT 0, dispatch_state TEXT NOT NULL DEFAULT '', dispatch_detail TEXT NOT NULL DEFAULT '', report_due INTEGER NOT NULL DEFAULT 0, report_attempts INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at TEXT, updated_at TEXT)");
     }
     public function prepare($query, ...$args) {
         $position = 0;
@@ -151,6 +152,8 @@ function reset_api($overrides = array()) {
     $GLOBALS['ava_test_options']['ava_woo_settings'] = array_merge(array('api_url' => 'https://ava.example.com', 'api_key' => 'ava_live_' . str_repeat('a', 32)), $overrides);
     $GLOBALS['ava_test_requests'] = array();
     $GLOBALS['ava_test_responses'] = array();
+    $GLOBALS['ava_test_transients'] = array();
+    $GLOBALS['ava_test_transient_expirations'] = array();
 }
 
 try {
@@ -253,10 +256,74 @@ try {
     check(!isset($GLOBALS['ava_test_requests'][0]['args']['body']), 'Report cannot send a new SMS');
     check(!isset($GLOBALS['ava_test_requests'][0]['args']['headers']['Idempotency-Key']), 'Reports do not misuse send idempotency headers');
     error_code('ava_id', Api::report('../unsafe'), 'Report ID cannot inject a path');
+    $metadata = array('id' => 'sms_meta', 'status' => 'pending', 'review_status' => 'approved', 'campaign_status' => 'draft', 'requires_review' => false, 'dispatch_state' => 'awaiting_dispatch', 'dispatch_detail' => 'dispatch_wait_capacity', 'detail' => 'dispatch_wait_capacity');
+    $GLOBALS['ava_test_responses'][] = mock_response(200, array_merge($metadata, array('text' => 'private payload', 'credentials' => 'private-key')));
+    $metadata_report = Api::report('sms_meta');
+    ksort($metadata);
+    ksort($metadata_report);
+    same($metadata, $metadata_report, 'Only the public dispatch and review metadata is retained, excluding message payload and credentials');
+    $GLOBALS['ava_test_responses'][] = mock_response(200, array('id' => 'sms_meta', 'status' => 'pending', 'dispatch_state' => array('bad'), 'requires_review' => 'false'));
+    same(array('id' => 'sms_meta', 'status' => 'pending'), Api::report('sms_meta'), 'Malformed optional metadata cannot inject a status or change the review boolean');
     reset_api();
     $GLOBALS['ava_test_responses'][] = new WP_Error('http_request_failed', 'private detail');
     $error = Api::report('sms_test_1');
     same(false, $error->get_error_data()['uncertain'], 'Read-only report failure does not mark a new send uncertain');
+
+    $wallet_body = array('balance_irr' => 1234567, 'held_irr' => 4567, 'available_irr' => 1230000, 'currency' => 'IRR');
+    reset_api(array('enabled' => 'no'));
+    $GLOBALS['ava_test_responses'][] = mock_response(200, array_merge($wallet_body, array('private' => 'do-not-display')));
+    $wallet = Api::wallet();
+    same($wallet_body, array_diff_key($wallet, array('checked_at' => true)), 'Wallet exposes only validated balances and IRR even when automatic sending is off');
+    check(is_int($wallet['checked_at']) && abs(time() - $wallet['checked_at']) <= 1, 'Wallet timestamp records the local successful read');
+    $request = $GLOBALS['ava_test_requests'][0];
+    same('https://ava.example.com/api/v1/wallet', $request['url'], 'Wallet uses the authenticated public wallet endpoint');
+    same('GET', $request['args']['method'], 'Wallet read never sends a message');
+    same(5, $request['args']['timeout'], 'Wallet does not block admin rendering for a long send timeout');
+    same(0, $request['args']['redirection'], 'Wallet cannot redirect an API secret');
+    same(true, $request['args']['sslverify'], 'Wallet requires valid TLS');
+    check(!isset($request['args']['body']) && !isset($request['args']['headers']['Idempotency-Key']), 'Wallet request has no message body or send idempotency header');
+    same('Bearer ava_live_' . str_repeat('a', 32), $request['args']['headers']['Authorization'], 'Wallet reuses the saved sending credential');
+    same($wallet, Api::wallet(), 'Second wallet read returns the bounded cached snapshot');
+    same(1, count($GLOBALS['ava_test_requests']), 'Repeated admin rendering uses a single wallet read');
+    $cache_key = array_keys($GLOBALS['ava_test_transients'])[0];
+    check(strpos($cache_key, str_repeat('a', 32)) === false && strpos($cache_key, 'example.com') === false, 'Cache identifiers never disclose origin or API key');
+    check($GLOBALS['ava_test_transient_expirations'][$cache_key] >= time() + 59 && $GLOBALS['ava_test_transient_expirations'][$cache_key] <= time() + 60, 'Wallet cache expires after sixty seconds');
+    $changed_wallet = array('balance_irr' => 900, 'held_irr' => 0, 'available_irr' => 900, 'currency' => 'IRR');
+    $GLOBALS['ava_test_options']['ava_woo_settings']['api_key'] = 'ava_live_' . str_repeat('z', 32);
+    $GLOBALS['ava_test_responses'][] = mock_response(200, $changed_wallet);
+    same(900, Api::wallet()['available_irr'], 'Changing the key cannot reuse another account wallet');
+    $GLOBALS['ava_test_options']['ava_woo_settings']['api_url'] = 'https://other.example.com';
+    $GLOBALS['ava_test_responses'][] = mock_response(200, array_merge($changed_wallet, array('balance_irr' => 800, 'available_irr' => 800)));
+    same(800, Api::wallet()['available_irr'], 'Changing the panel origin cannot reuse the previous wallet cache');
+    $GLOBALS['ava_test_responses'][] = mock_response(200, $wallet_body);
+    same(1230000, Api::wallet(true)['available_irr'], 'Explicit refresh replaces the cached snapshot');
+    $GLOBALS['ava_test_responses'][] = new WP_Error('transport', 'private detail');
+    error_code('ava_wallet_unavailable', Api::wallet(true), 'Refresh failure does not show a previous successful balance as current');
+    $requests_before = count($GLOBALS['ava_test_requests']);
+    error_code('ava_wallet_unavailable', Api::wallet(), 'Failures are briefly cached without pretending the balance is zero');
+    same($requests_before, count($GLOBALS['ava_test_requests']), 'Failure cache prevents bursts of failing admin reads');
+    foreach (array_keys($GLOBALS['ava_test_transient_expirations']) as $name) { $GLOBALS['ava_test_transient_expirations'][$name] = time() - 1; }
+    $GLOBALS['ava_test_responses'][] = mock_response(200, $wallet_body);
+    same(1230000, Api::wallet()['available_irr'], 'Expired wallet snapshot is replaced by a new GET');
+    foreach (array(401 => 'ava_wallet_auth', 403 => 'ava_wallet_scope', 429 => 'ava_wallet_rate', 302 => 'ava_wallet_unavailable', 404 => 'ava_wallet_unavailable', 503 => 'ava_wallet_unavailable', 202 => 'ava_wallet_unavailable') as $status => $expected) {
+        reset_api();
+        $GLOBALS['ava_test_responses'][] = mock_response($status, array('error' => 'secret upstream body'));
+        $error = Api::wallet();
+        error_code($expected, $error, 'Wallet HTTP error has a local safe message');
+        check(strpos($error->get_error_message(), 'secret') === false, 'Wallet HTTP response cannot expose upstream text');
+        same(1, count($GLOBALS['ava_test_requests']), 'Wallet HTTP failure has no automatic retries');
+    }
+    foreach (array('not JSON', array(), array_merge($wallet_body, array('balance_irr' => '1234567')), array_merge($wallet_body, array('held_irr' => -1)), array_merge($wallet_body, array('available_irr' => 3)), array_merge($wallet_body, array('currency' => 'IRT')), '{"balance_irr":1234567.0,"held_irr":4567,"available_irr":1230000,"currency":"IRR"}', array_merge($wallet_body, array('available_irr' => false)), array_merge($wallet_body, array('held_irr' => null))) as $malformed) {
+        reset_api();
+        $GLOBALS['ava_test_responses'][] = mock_response(200, $malformed);
+        error_code('ava_wallet_unavailable', Api::wallet(), 'Malformed financial values are never coerced into a balance');
+    }
+    reset_api();
+    $GLOBALS['ava_test_responses'][] = mock_response(200, array('balance_irr' => -5, 'held_irr' => 10, 'available_irr' => -15, 'currency' => 'IRR'));
+    same(-15, Api::wallet()['available_irr'], 'A legitimate signed available balance remains visible');
+    reset_api(array('api_key' => ''));
+    error_code('ava_wallet_configuration', Api::wallet(), 'Missing wallet credentials produce a configuration message');
+    same(0, count($GLOBALS['ava_test_requests']), 'Missing wallet configuration does not contact the network');
 
     reset_api(array('sender' => '30001111'));
     $snapshot = Settings::get();
@@ -284,10 +351,72 @@ try {
     same(1, count($GLOBALS['ava_test_requests']), 'Claimed job cannot be sent by a second worker');
     same('ava_job_one', $wpdb->get_var('SELECT provider_id FROM wp_ava_woo_messages WHERE id=' . $first), 'Provider ID is persisted for read-only reports');
 
+    // An API message can await review for hours. Reporting must survive that delay
+    // and recover from lost scheduler actions without posting the message again.
+    reset_api(array('enabled' => 'yes'));
+    $waiting = Queue::enqueue('09120000000', 'در انتظار تأیید دیرهنگام', 'delayed-approval');
+    $waiting_body = array('id' => 'delayed_approval_job', 'status' => 'pending', 'review_status' => 'pending', 'campaign_status' => 'draft', 'requires_review' => true, 'dispatch_state' => 'awaiting_review', 'dispatch_detail' => '', 'detail' => '');
+    $GLOBALS['ava_test_responses'][] = mock_response(202, $waiting_body);
+    Queue::process($waiting);
+    same('awaiting_review', $wpdb->get_var('SELECT status FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Pending review is not shown as an active send queue');
+    same('pending', $wpdb->get_var('SELECT review_status FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Review metadata is retained locally');
+    same('draft', $wpdb->get_var('SELECT campaign_status FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Campaign state is retained locally');
+    same(1, (int) $wpdb->get_var('SELECT requires_review FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Review requirement is retained locally');
+    for ($attempt = 0; $attempt < 8; ++$attempt) {
+        $GLOBALS['ava_test_responses'][] = mock_response(200, $waiting_body);
+        Queue::poll($waiting, $attempt);
+    }
+    same(8, (int) $wpdb->get_var('SELECT report_attempts FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Reporting continues beyond six attempts');
+    $due = (int) $wpdb->get_var('SELECT report_due FROM wp_ava_woo_messages WHERE id=' . $waiting);
+    check($due >= time() + HOUR_IN_SECONDS - 2 && $due <= time() + HOUR_IN_SECONDS, 'Long waits use an hourly maximum polling rate');
+    $before_poll = count($GLOBALS['ava_test_requests']);
+    Queue::poll($waiting, 2);
+    same($before_poll, count($GLOBALS['ava_test_requests']), 'Obsolete scheduled generations cannot restart reporting');
+    $GLOBALS['ava_test_schedules'] = array();
+    $wpdb->query('UPDATE wp_ava_woo_messages SET report_due=0 WHERE id=' . $waiting);
+    Queue::housekeeping();
+    $restored = array_values(array_filter($GLOBALS['ava_test_schedules'], function($event) use ($waiting) { return $event['hook'] === 'ava_woo_report' && $event['args'] === array($waiting, 8); }));
+    same(1, count($restored), 'Housekeeping restores a lost read-only report action');
+    Queue::housekeeping();
+    same(1, count(array_filter($GLOBALS['ava_test_schedules'], function($event) use ($waiting) { return $event['hook'] === 'ava_woo_report' && $event['args'] === array($waiting, 8); })), 'Housekeeping cannot duplicate the restored report action');
+    $GLOBALS['ava_test_responses'][] = new WP_Error('temporary_read_error', 'private network data');
+    Queue::poll($waiting, 8);
+    same('awaiting_review', $wpdb->get_var('SELECT status FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Transient GET failure preserves the last confirmed state');
+    same(9, (int) $wpdb->get_var('SELECT report_attempts FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Transient GET failure schedules the next bounded report');
+    $blocked_body = array_merge($waiting_body, array('review_status' => 'approved', 'requires_review' => false, 'dispatch_state' => 'credit_blocked', 'dispatch_detail' => 'dispatch_wait_insufficient_credit', 'detail' => 'dispatch_wait_insufficient_credit'));
+    $GLOBALS['ava_test_responses'][] = mock_response(200, $blocked_body);
+    Queue::poll($waiting, 9);
+    same('credit_blocked', $wpdb->get_var('SELECT status FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Approved but unfunded messages show the actual dispatch block');
+    same('dispatch_wait_insufficient_credit', $wpdb->get_var('SELECT dispatch_detail FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Machine-readable dispatch reason is retained');
+    same(0, (int) $wpdb->get_var('SELECT requires_review FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Approval clears the stored review requirement');
+    $GLOBALS['ava_test_responses'][] = mock_response(200, array_merge($blocked_body, array('status' => 'delivered', 'campaign_status' => 'completed', 'dispatch_state' => 'delivered', 'dispatch_detail' => 'provider_report_not_human_receipt')));
+    Queue::poll($waiting, 10);
+    same('delivered', $wpdb->get_var('SELECT status FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Delivery after delayed approval reaches a terminal state');
+    same(0, (int) $wpdb->get_var('SELECT report_due FROM wp_ava_woo_messages WHERE id=' . $waiting), 'Terminal report clears its durable polling deadline');
+    $request_total = count($GLOBALS['ava_test_requests']);
+    Queue::poll($waiting, 10);
+    same($request_total, count($GLOBALS['ava_test_requests']), 'Terminal messages stop automatic reports');
+    same(1, count(array_filter($GLOBALS['ava_test_requests'], function($event) { return $event['args']['method'] === 'POST'; })), 'Delayed approval and recovery never POST the SMS again');
+
+    foreach (array('awaiting_dispatch', 'awaiting_start', 'waiting_capacity', 'awaiting_configuration', 'paused', 'scheduled', 'queued', 'blocked', 'review_rejected') as $dispatch) {
+        reset_api(array('enabled' => 'yes'));
+        $state_id = Queue::enqueue('09120000000', 'وضعیت ارسال', 'dispatch-' . $dispatch);
+        $GLOBALS['ava_test_responses'][] = mock_response(202, array('id' => 'state_' . $dispatch, 'status' => 'pending', 'review_status' => 'approved', 'requires_review' => false, 'dispatch_state' => $dispatch));
+        Queue::process($state_id);
+        same($dispatch === 'blocked' ? 'dispatch_blocked' : ($dispatch === 'review_rejected' ? 'rejected' : $dispatch), $wpdb->get_var('SELECT status FROM wp_ava_woo_messages WHERE id=' . $state_id), 'Dispatch projection preserves the actual wait or rejection reason');
+        if ($dispatch === 'blocked') {
+            $GLOBALS['ava_test_responses'][] = mock_response(200, array('id' => 'state_blocked', 'status' => 'pending', 'dispatch_state' => 'queued'));
+            Queue::poll($state_id, 0);
+            same('queued', $wpdb->get_var('SELECT status FROM wp_ava_woo_messages WHERE id=' . $state_id), 'A pre-dispatch block remains reportable and can clear');
+        }
+    }
+
+    reset_api(array('enabled' => 'yes'));
+
     $GLOBALS['ava_test_responses'][] = mock_response(200, array('id' => 'ava_job_one', 'status' => 'delivered'));
     $report = Queue::refresh($first);
     same('delivered', $report['status'], 'Read-only report updates delivery status');
-    same('GET', $GLOBALS['ava_test_requests'][1]['args']['method'], 'Refreshing a queue job cannot send another SMS');
+    same('GET', $GLOBALS['ava_test_requests'][0]['args']['method'], 'Refreshing a queue job cannot send another SMS');
     $GLOBALS['ava_test_responses'][] = mock_response(200, array('id' => 'different_job', 'status' => 'rejected'));
     error_code('ava_report_mismatch', Queue::refresh($first), 'Report must refer to the original provider ID');
     same('delivered', $wpdb->get_var('SELECT status FROM wp_ava_woo_messages WHERE id=' . $first), 'Mismatched report cannot overwrite a message');
@@ -334,9 +463,11 @@ try {
     $two = Notifications::manual(42, '{order_number} نمونه');
     check(is_int($one) && is_int($two) && $one !== $two, 'Each explicit manual send is a new message');
     same('WEB-0042 نمونه', $wpdb->get_var('SELECT message FROM wp_ava_woo_messages WHERE id=' . $one), 'Manual messages render order placeholders');
-    $wpdb->query("UPDATE wp_ava_woo_messages SET created_at='2000-01-01 00:00:00' WHERE id=" . $one);
+    $wpdb->query("UPDATE wp_ava_woo_messages SET created_at='2000-01-01 00:00:00',status='delivered' WHERE id=" . $one);
+    $wpdb->query("UPDATE wp_ava_woo_messages SET created_at='2000-01-01 00:00:00' WHERE id=" . $two);
     Queue::cleanup();
     same(null, $wpdb->get_var('SELECT id FROM wp_ava_woo_messages WHERE id=' . $one), 'Expired message payloads are removed by retention cleanup');
+    same($two, (int) $wpdb->get_var('SELECT id FROM wp_ava_woo_messages WHERE id=' . $two), 'Retention cannot discard an unresolved admitted message');
 
     reset_api(array('enabled' => 'yes'));
     $same_request = '12345678-1234-4123-8123-123456789012';
@@ -346,7 +477,7 @@ try {
     error_code('ava_request', Notifications::manual(42, 'متن', 'not-a-uuid'), 'Manual request ID has a validated shape');
 
     // Admin handlers must reject capability/nonce failures before queue mutation.
-    foreach (array('test_send', 'manual_send', 'refresh') as $handler) {
+    foreach (array('test_send', 'manual_send', 'refresh', 'wallet_refresh') as $handler) {
         $GLOBALS['ava_test_can_manage'] = false;
         $_POST = array('job_id' => 1);
         try { Admin::$handler(); throw new RuntimeException('Unauthorized handler returned'); }
@@ -373,17 +504,75 @@ try {
     $_GET = array('tab' => 'settings');
     $_POST = array();
     $GLOBALS['ava_test_transients'] = array();
+    $GLOBALS['ava_test_responses'][] = mock_response(200, $wallet_body);
     ob_start();
     Admin::page();
     $html = ob_get_clean();
     check(strpos($html, 'ava_live_' . str_repeat('a', 32)) === false, 'Saved API secret is absent from rendered admin HTML');
     check(strpos($html, 'type="password"') !== false && strpos($html, 'autocomplete="new-password"') !== false, 'Secret replacement input avoids browser autofill');
     check(strpos($html, 'dir="rtl"') !== false, 'Persian settings render right-to-left');
+    check(strpos($html, 'ماندهٔ قابل مصرف') !== false && strpos($html, '۱٬۲۳۰٬۰۰۰') !== false, 'Admin wallet prominently displays the real available rials');
+    check(strpos($html, 'موجودی کل') !== false && strpos($html, 'اعتبار رزروشده') !== false && strpos($html, 'ریال') !== false, 'Admin wallet distinguishes the total from reserved credit and labels the currency');
+    check(strpos($html, 'https://ava.example.com/panel#wallet') !== false, 'Charge link opens the configured panel wallet');
+    check(strpos($html, 'ava_woo_wallet_refresh') !== false, 'Wallet has a separate refresh form');
+    $network_before = count($GLOBALS['ava_test_requests']);
     same('manage_woocommerce', Admin::capability(), 'Settings save uses the same merchant capability');
     $GLOBALS['ava_test_can_manage'] = false;
     ob_start(); Admin::page(); $html = ob_get_clean();
     same('', $html, 'Users without merchant permission cannot read the admin screen');
+    same($network_before, count($GLOBALS['ava_test_requests']), 'Unauthorized page access cannot retrieve wallet balances');
     $GLOBALS['ava_test_can_manage'] = true;
+    $GLOBALS['ava_test_responses'][] = mock_response(200, $changed_wallet);
+    $queue_before = (int) $wpdb->get_var('SELECT COUNT(*) FROM wp_ava_woo_messages');
+    try { Admin::wallet_refresh(); } catch (AvaTestStop $stop) { same('redirect', $stop->getMessage(), 'Authorized wallet refresh returns to settings'); }
+    same($queue_before, (int) $wpdb->get_var('SELECT COUNT(*) FROM wp_ava_woo_messages'), 'Wallet refresh cannot enqueue a message');
+    same(900, Api::wallet()['available_irr'], 'Authorized refresh replaces the displayed wallet cache');
+    same('ava_woo_wallet_refresh', end($GLOBALS['ava_test_nonce_checks']), 'Wallet refresh validates its own nonce');
+    $GLOBALS['ava_test_responses'][] = mock_response(500, array('error' => 'secret upstream body'));
+    Api::wallet(true);
+    ob_start(); Admin::page(); $wallet_error_html = ob_get_clean();
+    check(strpos($wallet_error_html, 'موجودی حساب آوا دریافت نشد') !== false && strpos($wallet_error_html, 'ava-woo-wallet-available') === false, 'Wallet failure renders an explicit error without a made-up zero');
+    check(strpos($wallet_error_html, 'secret upstream body') === false, 'Wallet admin errors never render the upstream response');
+
+    // WooCommerce's scheduler refuses a duplicate of an action that is running.
+    // A new persisted generation must still be admitted from inside the callback.
+    function as_schedule_single_action($timestamp, $hook, $args, $group, $unique) {
+        foreach ($GLOBALS['ava_test_as_actions'] as $action) {
+            if ($unique && $action['hook'] === $hook && $action['args'] === $args && $action['group'] === $group && in_array($action['state'], array('pending', 'running'), true)) {
+                return 0;
+            }
+        }
+        $GLOBALS['ava_test_as_actions'][] = array('timestamp' => $timestamp, 'hook' => $hook, 'args' => $args, 'group' => $group, 'state' => 'pending');
+        return count($GLOBALS['ava_test_as_actions']);
+    }
+    $GLOBALS['wpdb'] = new AvaTestWpdb();
+    $wpdb = $GLOBALS['wpdb'];
+    $GLOBALS['ava_test_as_actions'] = array();
+    reset_api(array('enabled' => 'yes'));
+    $as_job = Queue::enqueue('09120000000', 'پیگیری ووکامرس', 'as-report-generation');
+    $GLOBALS['ava_test_responses'][] = mock_response(202, array('id' => 'as_job', 'status' => 'pending', 'requires_review' => true));
+    Queue::process($as_job);
+    foreach ($GLOBALS['ava_test_as_actions'] as &$action) {
+        if ($action['hook'] === 'ava_woo_report') { $action['state'] = 'running'; }
+    }
+    unset($action);
+    $GLOBALS['ava_test_responses'][] = mock_response(200, array('id' => 'as_job', 'status' => 'pending', 'requires_review' => true));
+    Queue::poll($as_job, 0);
+    same(1, count(array_filter($GLOBALS['ava_test_as_actions'], function($action) use ($as_job) { return $action['hook'] === 'ava_woo_report' && $action['args'] === array($as_job, 1) && $action['state'] === 'pending'; })), 'Action Scheduler admits the next report while the previous generation is running');
+
+    $GLOBALS['wpdb'] = new AvaTestWpdb();
+    $wpdb = $GLOBALS['wpdb'];
+    $GLOBALS['ava_test_as_actions'] = array();
+    reset_api(array('enabled' => 'yes'));
+    for ($record = 0; $record < 101; ++$record) {
+        $repair_id = Queue::enqueue('09120000000', 'در انتظار بررسی', 'repair-batch-' . $record);
+        $wpdb->query("UPDATE wp_ava_woo_messages SET status='awaiting_review',provider_id='existing_" . $record . "' WHERE id=" . $repair_id);
+    }
+    Queue::housekeeping();
+    same(100, count(array_filter($GLOBALS['ava_test_as_actions'], function($action) { return $action['hook'] === 'ava_woo_report'; })), 'Housekeeping recovery schedules at most 100 reports per batch');
+    Queue::housekeeping();
+    same(101, count(array_filter($GLOBALS['ava_test_as_actions'], function($action) { return $action['hook'] === 'ava_woo_report'; })), 'An additional recovery batch reaches remaining migrated records without duplicate actions');
+    same(0, count($GLOBALS['ava_test_requests']), 'Recovery only schedules reports and never invokes the SMS send endpoint');
 
     // Constants cannot be undefined, so the external-secret override is tested last.
     reset_api();

@@ -4,6 +4,53 @@ namespace AvaWoo;
 defined( 'ABSPATH' ) || exit;
 
 final class Api {
+    /** Read only the current account wallet; never infer credit from send results. */
+    public static function wallet( $refresh = false, $settings = null ) {
+        $settings = null === $settings ? Settings::get() : $settings;
+        $url = Settings::valid_url( $settings['api_url'] ?? null );
+        $key = $settings['api_key'] ?? '';
+        if ( ! $url || ! is_string( $key ) || ! preg_match( '/^ava_live_[A-Za-z0-9_-]{16,240}$/D', $key ) ) {
+            return new \WP_Error( 'ava_wallet_configuration', 'برای نمایش موجودی، نشانی پنل و کلید API آوا را ذخیره کنید.' );
+        }
+        // A different URL/key must never inherit another account's cached balance.
+        $cache_key = 'ava_woo_wallet_' . hash( 'sha256', $url . "\n" . $key );
+        if ( ! $refresh ) {
+            $cached = get_transient( $cache_key );
+            if ( is_array( $cached ) && isset( $cached['value'] ) ) {
+                return $cached['value'];
+            }
+        }
+        $response = wp_safe_remote_request( $url . '/api/v1/wallet', array(
+            'method' => 'GET', 'timeout' => 5, 'redirection' => 0, 'sslverify' => true,
+            'reject_unsafe_urls' => true, 'limit_response_size' => 16384,
+            'headers' => array( 'Authorization' => 'Bearer ' . $key, 'Accept' => 'application/json' ),
+            'user-agent' => 'AvaWooCommerce/' . AVA_WOO_VERSION . '; WordPress',
+        ) );
+        $result = new \WP_Error( 'ava_wallet_unavailable', 'موجودی حساب آوا دریافت نشد؛ کمی بعد تازه‌سازی کنید یا کیف پول پنل آوا را بررسی کنید.' );
+        if ( ! is_wp_error( $response ) ) {
+            $status = wp_remote_retrieve_response_code( $response );
+            if ( 401 === $status ) {
+                $result = new \WP_Error( 'ava_wallet_auth', 'کلید API نامعتبر یا منقضی است؛ کلید اتصال آوا را بررسی کنید.' );
+            } elseif ( 403 === $status ) {
+                $result = new \WP_Error( 'ava_wallet_scope', 'کلید API اجازهٔ مشاهدهٔ موجودی ندارد؛ از کلید دارای مجوز sms:send یا wallet:read استفاده کنید.' );
+            } elseif ( 429 === $status ) {
+                $result = new \WP_Error( 'ava_wallet_rate', 'سقف درخواست API پر شده است؛ کمی بعد موجودی را تازه‌سازی کنید.' );
+            } elseif ( 200 === $status ) {
+                $body = json_decode( wp_remote_retrieve_body( $response ), true );
+                if ( is_array( $body ) && isset( $body['balance_irr'], $body['held_irr'], $body['available_irr'], $body['currency'] ) &&
+                    'IRR' === $body['currency'] && is_int( $body['balance_irr'] ) && is_int( $body['held_irr'] ) &&
+                    is_int( $body['available_irr'] ) && $body['held_irr'] >= 0 &&
+                    $body['balance_irr'] - $body['held_irr'] === $body['available_irr'] ) {
+                    $result = array( 'balance_irr' => $body['balance_irr'], 'held_irr' => $body['held_irr'],
+                        'available_irr' => $body['available_irr'], 'currency' => 'IRR', 'checked_at' => time() );
+                }
+            }
+        }
+        // Cache failures too, without reusing a previous successful account value.
+        set_transient( $cache_key, array( 'value' => $result ), 60 );
+        return $result;
+    }
+
     public static function send( $phone, $text, $idempotency_key, $settings = null ) {
         $phone = Phone::normalize( $phone );
         if ( is_wp_error( $phone ) ) {
@@ -76,6 +123,20 @@ final class Api {
              ! isset( $body['status'] ) || ! is_string( $body['status'] ) ) {
             return new \WP_Error( 'ava_response', __( 'پاسخ آوا ساختار قابل تأیید ندارد؛ از ارسال مجدد خودکار جلوگیری شد.', 'ava-woocommerce-plugin' ), array( 'uncertain' => 'POST' === $method ) );
         }
-        return array( 'id' => $body['id'], 'status' => sanitize_key( $body['status'] ) );
+        $result = array( 'id' => $body['id'], 'status' => sanitize_key( $body['status'] ) );
+        foreach ( array( 'review_status', 'campaign_status', 'dispatch_state' ) as $field ) {
+            if ( isset( $body[ $field ] ) && is_string( $body[ $field ] ) && preg_match( '/^[a-z0-9_-]{0,64}$/D', $body[ $field ] ) ) {
+                $result[ $field ] = $body[ $field ];
+            }
+        }
+        if ( isset( $body['requires_review'] ) && is_bool( $body['requires_review'] ) ) {
+            $result['requires_review'] = $body['requires_review'];
+        }
+        foreach ( array( 'detail', 'dispatch_detail' ) as $field ) {
+            if ( isset( $body[ $field ] ) && is_string( $body[ $field ] ) ) {
+                $result[ $field ] = sanitize_text_field( mb_substr( $body[ $field ], 0, 240 ) );
+            }
+        }
+        return $result;
     }
 }
