@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.3 — 2026-11-13
+
+- Add an authenticated connection check for the saved key, required SMS scopes and account/service readiness without sending a message or charging credit.
+- Explain revoked, expired and security-invalidated keys with steps to replace the saved credential; keep diagnostics isolated to each endpoint/key and never display upstream secrets.
+- Preserve atomic per-slot template revisions and empty order method labels from the published 1.2.0 package.
+- Preserve all accepted, failed and uncertain message outcomes when a key changes; credential replacement never silently replays old SMS.
+
+## 1.2.2 — 2026-11-12
+
+- Cache admin log count and page results for sixty seconds with generation invalidation after successful queue mutations.
+- Preserve live database reads for atomic claims, deduplication, delivery reporting and recovery.
+- Document precise coding-standard exceptions for necessary custom-table operations and uninstall cleanup.
+- Add cache regression checks for zero results, mutation invalidation, late stale fills, generation eviction and filtered pagination.
+
+## 1.2.1 — 2026-11-11
+
+- Prepare the WordPress.org submission package with the ava-sms-for-woocommerce directory and translation domain.
+- Align the public plugin name and clarify installation and external service documentation.
+
+## 1.2.0 — 2026-11-11
+
+- Attach immutable store, template revision, and used-variable snapshots for one-time custom template review on supporting Ava panels.
+- Preserve revisions across ordinary order/customer/amount changes; advance them on saved edits, including a change followed by a revert.
+- Separate cloned store identities after a canonical site URL change, while preserving old queued snapshots.
+- Keep legacy jobs and unsupported template facts on the existing reviewed send path. Package available from the official Ava downloads page.
+
 ## 1.1.0 — 2026-11-08
 
 - Show the real Ava wallet's available balance, total balance and reserved credit in integer rials on the settings page, independently of automatic SMS sending.

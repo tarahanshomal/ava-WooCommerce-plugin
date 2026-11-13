@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 define('ABSPATH', __DIR__ . '/fixtures/wordpress/');
-define('AVA_WOO_VERSION', '1.1.0');
+define('AVA_WOO_VERSION', '1.2.3');
 define('MINUTE_IN_SECONDS', 60);
 define('HOUR_IN_SECONDS', 3600);
 define('DAY_IN_SECONDS', 86400);
@@ -23,7 +23,10 @@ function wp_strip_all_tags($text) { return strip_tags(preg_replace('@<(script|st
 function sanitize_key($key) { return preg_replace('/[^a-z0-9_\-]/', '', strtolower((string) $key)); }
 function sanitize_text_field($text) { return trim(preg_replace('/[\r\n\t ]+/', ' ', wp_strip_all_tags($text))); }
 function sanitize_textarea_field($text) { return trim(wp_strip_all_tags($text)); }
-function get_bloginfo($field = '') { return 'فروشگاه نمونه &amp; آزمایشی'; }
+function get_bloginfo($field = '') { return $GLOBALS['ava_test_title'] ?? 'فروشگاه نمونه &amp; آزمایشی'; }
+function home_url($path = '') { return ($GLOBALS['ava_test_home'] ?? 'https://store.example.com') . '/' . ltrim($path, '/'); }
+function update_option($name, $value, $autoload = null) { $GLOBALS['ava_test_options'][$name] = $value; return true; }
+function maybe_serialize($value) { return is_array($value) || is_object($value) ? serialize($value) : $value; }
 function get_option($name, $default = false) { return array_key_exists($name, $GLOBALS['ava_test_options']) ? $GLOBALS['ava_test_options'][$name] : $default; }
 function wp_parse_url($url) { return parse_url($url); }
 function wp_json_encode($value, $flags = 0) { return json_encode($value, $flags); }
@@ -43,9 +46,26 @@ function get_current_user_id() { return 7; }
 function set_transient($name, $value, $expires = 0) { $GLOBALS['ava_test_transients'][$name] = $value; $GLOBALS['ava_test_transient_expirations'][$name] = $expires ? time() + $expires : 0; return true; }
 function get_transient($name) { if (($GLOBALS['ava_test_transient_expirations'][$name] ?? 0) && $GLOBALS['ava_test_transient_expirations'][$name] <= time()) { return false; } return $GLOBALS['ava_test_transients'][$name] ?? false; }
 function delete_transient($name) { unset($GLOBALS['ava_test_transients'][$name]); return true; }
+function wp_cache_get($key, $group = '', $force = false, &$found = null) {
+    $entry = $GLOBALS['ava_test_cache'][$group][$key] ?? null;
+    $found = null !== $entry && (!$entry['expires'] || $entry['expires'] > time());
+    return $found ? $entry['value'] : false;
+}
+function wp_cache_set($key, $value, $group = '', $expires = 0) {
+    $GLOBALS['ava_test_cache'][$group][$key] = array('value' => $value, 'expires' => $expires ? time() + $expires : 0);
+    return true;
+}
+function wp_cache_delete($key, $group = '') { $GLOBALS['ava_test_cache_deletes'][] = array($key, $group); unset($GLOBALS['ava_test_cache'][$group][$key]); return true; }
+function wp_cache_set_last_changed($group) {
+    static $generation = 0;
+    $value = 'synthetic-generation-' . ++$generation;
+    wp_cache_set('last_changed', $value, $group);
+    return $value;
+}
+function wp_cache_get_last_changed($group) { return wp_cache_get('last_changed', $group) ?: wp_cache_set_last_changed($group); }
 function wp_safe_redirect($url) { $GLOBALS['ava_test_redirect'] = $url; throw new AvaTestStop('redirect'); }
 function admin_url($path = '') { return 'https://store.example.com/wp-admin/' . $path; }
-function add_query_arg($args, $url) { return $url . (strpos($url, '?') === false ? '?' : '&') . http_build_query($args); }
+function add_query_arg($args, $url, $base = '') { if (!is_array($args)) { $args = array($args => $url); $url = $base; } return $url . (strpos($url, '?') === false ? '?' : '&') . http_build_query($args); }
 function esc_html($value) { return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8'); }
 function esc_attr($value) { return esc_html($value); }
 function esc_url($value) { return esc_html($value); }
@@ -58,6 +78,12 @@ function settings_errors($setting) {}
 function submit_button($text = 'Save', $type = 'primary', $name = 'submit', $wrap = true) { echo '<button type="submit">' . esc_html($text) . '</button>'; }
 function wp_nonce_field($action) { echo '<input type="hidden" name="_wpnonce" value="synthetic_nonce">'; }
 function wp_date($format, $timestamp) { return gmdate($format, $timestamp); }
+function selected($selected, $current = true, $display = true) { $output = ((string)$selected === (string)$current) ? ' selected="selected"' : ''; if ($display) { echo $output; } return $output; }
+function number_format_i18n($value) { return number_format($value); }
+function wp_html_excerpt($value, $length, $more = null) { return mb_substr($value, 0, $length) . (mb_strlen($value) > $length ? $more : ''); }
+function sanitize_html_class($value) { return preg_replace('/[^A-Za-z0-9_-]/', '', $value); }
+function wp_kses_post($value) { return $value; }
+function paginate_links($args) { return ''; }
 
 
 function add_settings_error($setting, $code, $message, $type = 'error') { $GLOBALS['ava_test_settings_errors'][] = array($setting, $code, $message, $type); }
@@ -74,42 +100,89 @@ function wp_remote_retrieve_body($response) { return $response['body'] ?? ''; }
 final class WC_Order {
     public $id = 42;
     public $status = 'processing';
+    public $fields = array();
     private $meta = array();
     public function get_meta($key, $single = true) { return $this->meta[$key] ?? ''; }
     public function update_meta_data($key, $value) { $this->meta[$key] = $value; }
     public function save_meta_data() { return true; }
     public function get_id() { return $this->id; }
-    public function get_order_number() { return 'WEB-0042'; }
+    public function get_order_number() { return $this->fields['order_number'] ?? 'WEB-0042'; }
     public function get_status() { return $this->status; }
-    public function get_total() { return '125000'; }
-    public function get_currency() { return 'IRR'; }
-    public function get_billing_first_name() { return '<b>کاربر</b>'; }
-    public function get_billing_last_name() { return 'نمونه'; }
-    public function get_billing_phone() { return '09120000000'; }
-    public function get_payment_method_title() { return 'پرداخت &amp; آزمایشی'; }
-    public function get_shipping_method() { return 'پست'; }
+    public function get_total() { return $this->fields['total'] ?? '125000'; }
+    public function get_currency() { return $this->fields['currency'] ?? 'IRR'; }
+    public function get_billing_first_name() { return $this->fields['billing_first_name'] ?? '<b>کاربر</b>'; }
+    public function get_billing_last_name() { return $this->fields['billing_last_name'] ?? 'نمونه'; }
+    public function get_billing_phone() { return $this->fields['billing_phone'] ?? '09120000000'; }
+    public function get_payment_method_title() { return $this->fields['payment_method_title'] ?? 'پرداخت &amp; آزمایشی'; }
+    public function get_shipping_method() { return $this->fields['shipping_method'] ?? 'پست'; }
 }
 
 final class AvaTestWpdb {
     public $prefix = 'wp_';
+    public $options = 'wp_options';
+    public $reads = 0;
+    public $after_results;
+    public $last_error = '';
+    public $fail_next_count = false;
+    public $fail_next_results = false;
     private $db;
     public function __construct() {
         $this->db = new PDO('sqlite::memory:');
         $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $this->db->exec("CREATE TABLE wp_ava_woo_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, order_id INTEGER, audience TEXT, phone TEXT, message TEXT, api_url TEXT, key_fingerprint TEXT, sender TEXT, status TEXT, provider_id TEXT NOT NULL DEFAULT '', review_status TEXT NOT NULL DEFAULT '', campaign_status TEXT NOT NULL DEFAULT '', requires_review INTEGER NOT NULL DEFAULT 0, dispatch_state TEXT NOT NULL DEFAULT '', dispatch_detail TEXT NOT NULL DEFAULT '', report_due INTEGER NOT NULL DEFAULT 0, report_attempts INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at TEXT, updated_at TEXT)");
+        $this->db->exec("CREATE TABLE wp_ava_woo_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, order_id INTEGER, audience TEXT, phone TEXT, message TEXT, template_context TEXT NOT NULL DEFAULT '', api_url TEXT, key_fingerprint TEXT, sender TEXT, status TEXT, provider_id TEXT NOT NULL DEFAULT '', review_status TEXT NOT NULL DEFAULT '', campaign_status TEXT NOT NULL DEFAULT '', requires_review INTEGER NOT NULL DEFAULT 0, dispatch_state TEXT NOT NULL DEFAULT '', dispatch_detail TEXT NOT NULL DEFAULT '', report_due INTEGER NOT NULL DEFAULT 0, report_attempts INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at TEXT, updated_at TEXT)");
     }
     public function prepare($query, ...$args) {
         $position = 0;
-        return preg_replace_callback('/%[sd]/', function ($match) use ($args, &$position) {
+        return preg_replace_callback('/%[sdi]/', function ($match) use ($args, &$position) {
             if (!array_key_exists($position, $args)) { throw new RuntimeException('Missing prepared parameter'); }
             $value = $args[$position++];
+            if ($match[0] === '%i') { return '`' . str_replace('`', '``', (string) $value) . '`'; }
             return $match[0] === '%d' ? (string) ((int) $value) : $this->db->quote((string) $value);
         }, $query);
     }
-    public function query($query) { return $this->db->exec(str_replace('INSERT IGNORE INTO', 'INSERT OR IGNORE INTO', $query)); }
-    public function get_var($query) { $value = $this->db->query($query)->fetchColumn(); return $value === false ? null : $value; }
-    public function get_row($query) { $row = $this->db->query($query)->fetch(PDO::FETCH_OBJ); return $row === false ? null : $row; }
-    public function get_col($query) { return $this->db->query($query)->fetchAll(PDO::FETCH_COLUMN); }
+    public function query($query) {
+        if (strpos($query, 'UPDATE wp_options SET option_value = ') === 0) {
+            if (!empty($GLOBALS['ava_test_cas_error'])) { return false; }
+            if (!preg_match("/^UPDATE wp_options SET option_value = ('(?:[^']|'')*') WHERE option_name = ('(?:[^']|'')*') AND BINARY option_value = BINARY ('(?:[^']|'')*')$/", $query, $parts)) {
+                throw new RuntimeException('Unexpected options CAS query');
+            }
+            $decode = function($value) { return str_replace("''", "'", substr($value, 1, -1)); };
+            $next = $decode($parts[1]); $name = $decode($parts[2]); $old = $decode($parts[3]);
+            if (isset($GLOBALS['ava_test_cas_competitor'])) {
+                $competitor = $GLOBALS['ava_test_cas_competitor']; unset($GLOBALS['ava_test_cas_competitor']);
+                $competitor($name, unserialize($next), $old);
+            }
+            if (!array_key_exists($name, $GLOBALS['ava_test_options']) || maybe_serialize($GLOBALS['ava_test_options'][$name]) !== $old) { return 0; }
+            $GLOBALS['ava_test_options'][$name] = unserialize($next);
+            return 1;
+        }
+        return $this->db->exec(str_replace('INSERT IGNORE INTO', 'INSERT OR IGNORE INTO', $query));
+    }
+    public function get_var($query) {
+        ++$this->reads;
+        $this->last_error = '';
+        if ($this->fail_next_count && strpos($query, 'COUNT(*)') !== false) {
+            $this->fail_next_count = false;
+            $this->last_error = 'synthetic-private-database-error';
+            return null;
+        }
+        $value = $this->db->query($query)->fetchColumn();
+        return $value === false ? null : $value;
+    }
+    public function get_row($query) { ++$this->reads; $row = $this->db->query($query)->fetch(PDO::FETCH_OBJ); return $row === false ? null : $row; }
+    public function get_col($query) { ++$this->reads; return $this->db->query($query)->fetchAll(PDO::FETCH_COLUMN); }
+    public function get_results($query) {
+        ++$this->reads;
+        $this->last_error = '';
+        if ($this->fail_next_results) {
+            $this->fail_next_results = false;
+            $this->last_error = 'synthetic-private-database-error';
+            return array();
+        }
+        $rows = $this->db->query($query)->fetchAll(PDO::FETCH_OBJ);
+        if ($this->after_results) { $callback = $this->after_results; $this->after_results = null; $callback(); }
+        return $rows;
+    }
     public function update($table, $values, $where) {
         $sets = $conditions = array();
         foreach ($values as $key => $value) { $sets[] = $key . '=' . $this->db->quote((string) $value); }
@@ -127,6 +200,7 @@ $GLOBALS['ava_test_options'] = array();
 $GLOBALS['ava_test_requests'] = array();
 $GLOBALS['ava_test_responses'] = array();
 $GLOBALS['ava_test_settings_errors'] = array();
+$GLOBALS['wpdb'] = new AvaTestWpdb();
 foreach (array('phone', 'template', 'settings', 'api', 'queue', 'notifications', 'admin') as $class) {
     require dirname(__DIR__) . '/includes/class-' . $class . '.php';
 }
@@ -155,6 +229,8 @@ function reset_api($overrides = array()) {
     $GLOBALS['ava_test_transients'] = array();
     $GLOBALS['ava_test_transient_expirations'] = array();
 }
+
+if (defined('AVA_WOO_TEST_BOOTSTRAP_ONLY') && AVA_WOO_TEST_BOOTSTRAP_ONLY) { return; }
 
 try {
     foreach (array('09120000000', '۹۱۲۰۰۰۰۰۰۰', '۰۹۱۲۰۰۰۰۰۰۰', '٠٩١٢٠٠٠٠٠٠٠', '+989120000000', '00989120000000', '989120000000', '9120000000', ' +98 (912) 000-0000 ', "\u{200f}۰۹۱۲\u{200c}۰۰۰۰۰۰۰") as $phone) {
@@ -573,6 +649,10 @@ try {
     Queue::housekeeping();
     same(101, count(array_filter($GLOBALS['ava_test_as_actions'], function($action) { return $action['hook'] === 'ava_woo_report'; })), 'An additional recovery batch reaches remaining migrated records without duplicate actions');
     same(0, count($GLOBALS['ava_test_requests']), 'Recovery only schedules reports and never invokes the SMS send endpoint');
+
+    require __DIR__ . '/template-context-checks.php';
+    require __DIR__ . '/log-cache-checks.php';
+    require __DIR__ . '/connection-checks.php';
 
     // Constants cannot be undefined, so the external-secret override is tested last.
     reset_api();

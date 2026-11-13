@@ -6,7 +6,7 @@ defined( 'ABSPATH' ) || exit;
 final class Phone {
     public static function normalize( $phone ) {
         if ( ! is_scalar( $phone ) ) {
-            return new \WP_Error( 'ava_phone', __( 'شمارهٔ موبایل معتبر نیست.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_phone', __( 'شمارهٔ موبایل معتبر نیست.', 'ava-sms-for-woocommerce' ) );
         }
         $phone = strtr( (string) $phone, array_combine(
             preg_split( '//u', '۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', -1, PREG_SPLIT_NO_EMPTY ),
@@ -22,7 +22,7 @@ final class Phone {
         } elseif ( 10 === strlen( $phone ) && '9' === substr( $phone, 0, 1 ) ) {
             $phone = '0' . $phone;
         }
-        return preg_match( '/^09[0-9]{9}$/D', $phone ) ? $phone : new \WP_Error( 'ava_phone', __( 'شماره باید موبایل ایران باشد؛ مانند ۰۹۱۲۳۴۵۶۷۸۹.', 'ava-woocommerce-plugin' ) );
+        return preg_match( '/^09[0-9]{9}$/D', $phone ) ? $phone : new \WP_Error( 'ava_phone', __( 'شماره باید موبایل ایران باشد؛ مانند ۰۹۱۲۳۴۵۶۷۸۹.', 'ava-sms-for-woocommerce' ) );
     }
 
     public static function mask( $phone ) {

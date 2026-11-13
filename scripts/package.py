@@ -9,9 +9,10 @@ import stat
 import zipfile
 from pathlib import Path
 
-SLUG = "ava-WooCommerce-plugin"
+SLUG = "ava-sms-for-woocommerce"
+LEGACY_SLUG = "ava-WooCommerce-plugin"
 ROOT = Path(__file__).resolve().parents[1]
-TOP_LEVEL = ("ava-woocommerce-plugin.php", "uninstall.php", "index.php", "readme.txt", "README.md", "LICENSE", "CHANGELOG.md")
+TOP_LEVEL = ("ava-woocommerce-plugin.php", "uninstall.php", "index.php", "readme.txt", "LICENSE")
 PRODUCTION_DIRS = ("includes", "assets", "languages")
 ALLOWED_SUFFIXES = {".php", ".css", ".js", ".json", ".svg", ".png", ".jpg", ".webp", ".pot", ".po", ".mo"}
 FIXED_TIMESTAMP = (2026, 11, 4, 0, 0, 0)
@@ -46,11 +47,13 @@ def files(root: Path = ROOT) -> list[Path]:
     return sorted(selected, key=lambda path: path.relative_to(root).as_posix())
 
 
-def build(output: Path, root: Path = ROOT) -> Path:
+def build(output: Path, root: Path = ROOT, slug: str = SLUG) -> Path:
+    if slug not in (SLUG, LEGACY_SLUG):
+        raise ValueError("Unsupported distribution slug")
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files(root):
-            name = SLUG + "/" + path.relative_to(root).as_posix()
+            name = slug + "/" + path.relative_to(root).as_posix()
             info = zipfile.ZipInfo(name, FIXED_TIMESTAMP)
             info.create_system = 3
             info.external_attr = (stat.S_IFREG | 0o644) << 16
@@ -63,12 +66,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--tag", help="Require the Git tag to match the plugin Version header")
+    parser.add_argument("--legacy-upgrade", action="store_true", help="Keep the original ava-WooCommerce-plugin directory for safe in-place upgrades")
     args = parser.parse_args()
     release_version = version()
     if args.tag and args.tag != "v" + release_version:
         parser.error("Tag must be v" + release_version)
-    output = args.output or ROOT / "build" / (SLUG + "-" + release_version + ".zip")
-    build(output)
+    slug = LEGACY_SLUG if args.legacy_upgrade else SLUG
+    output = args.output or ROOT / "build" / (slug + "-" + release_version + ".zip")
+    build(output, slug=slug)
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     output.with_suffix(output.suffix + ".sha256").write_text(digest + "  " + output.name + "\n", encoding="ascii")
     print(str(output))

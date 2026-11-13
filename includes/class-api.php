@@ -4,6 +4,103 @@ namespace AvaWoo;
 defined( 'ABSPATH' ) || exit;
 
 final class Api {
+    private static function connection_key( $settings ) {
+        return 'ava_woo_connection_' . hash( 'sha256', (string) ( $settings['api_url'] ?? '' ) . "\n" . (string) ( $settings['api_key'] ?? '' ) );
+    }
+
+    /** A diagnostic belongs only to the saved endpoint and credential. */
+    public static function connection_snapshot( $settings = null ) {
+        $settings = null === $settings ? Settings::get() : $settings;
+        return get_transient( self::connection_key( $settings ) );
+    }
+
+    private static function remember_connection( $settings, $state, $message ) {
+        $result = array( 'state' => $state, 'message' => $message, 'checked_at' => time() );
+        set_transient( self::connection_key( $settings ), $result, DAY_IN_SECONDS );
+        return $result;
+    }
+
+    private static function clear_authentication_failure( $settings ) {
+        $snapshot = self::connection_snapshot( $settings );
+        if ( is_array( $snapshot ) && 'authentication_failed' === ( $snapshot['state'] ?? '' ) ) {
+            delete_transient( self::connection_key( $settings ) );
+        }
+    }
+
+    private static function authentication_failure( $settings, $response ) {
+        $body = json_decode( wp_remote_retrieve_body( $response ), true );
+        $reason = is_array( $body ) && is_string( $body['auth_reason'] ?? null ) ? $body['auth_reason'] : '';
+        $messages = array(
+            'key_version_mismatch' => 'کلید اتصال پس از تغییر امنیتی یا بازیابی رمز حساب آوا باطل شده است.',
+            'key_expired' => 'کلید اتصال آوا منقضی شده است.',
+            'key_revoked' => 'کلید اتصال آوا لغو شده است.',
+            'account_inactive' => 'حساب آوا فعال نیست؛ وضعیت حساب را در پنل آوا یا با پشتیبانی بررسی کنید.',
+        );
+        $message = $messages[ $reason ] ?? 'کلید اتصال آوا پذیرفته نشد (خطای ۴۰۱).';
+        if ( 'account_inactive' !== $reason ) {
+            $message .= ' در «اتصال و کلیدهای API» پنل آوا، کلید تازه با مجوزهای sms:send و sms:read بسازید، آن را در تنظیمات افزونه جایگزین و ذخیره کنید و «بررسی اتصال» را بزنید.';
+        }
+        $message .= ' پیامک‌های قبلی خودکار دوباره ارسال نمی‌شوند.';
+        self::remember_connection( $settings, 'authentication_failed', $message );
+        return $message;
+    }
+
+    /** Authenticate and inspect readiness without creating a message or a charge. */
+    public static function connection( $settings = null ) {
+        $settings = null === $settings ? Settings::get() : $settings;
+        $url = Settings::valid_url( $settings['api_url'] ?? null );
+        $key = $settings['api_key'] ?? '';
+        if ( ! $url || ! is_string( $key ) || ! preg_match( '/^ava_live_[A-Za-z0-9_-]{16,240}$/D', $key ) ) {
+            $message = 'ابتدا نشانی پنل و کلید API آوا را ذخیره کنید؛ سپس اتصال را بررسی کنید.';
+            self::remember_connection( $settings, 'configuration', $message );
+            return new \WP_Error( 'ava_connection_configuration', $message );
+        }
+        $response = wp_safe_remote_request( $url . '/api/v1/connection', array(
+            'method' => 'GET', 'timeout' => 5, 'redirection' => 0, 'sslverify' => true,
+            'reject_unsafe_urls' => true, 'limit_response_size' => 16384,
+            'headers' => array( 'Authorization' => 'Bearer ' . $key, 'Accept' => 'application/json' ),
+            'user-agent' => 'AvaWooCommerce/' . AVA_WOO_VERSION . '; WordPress',
+        ) );
+        $message = 'پاسخ بررسی اتصال دریافت نشد؛ نشانی پنل و دسترسی HTTPS فروشگاه را بررسی و دوباره تلاش کنید.';
+        if ( ! is_wp_error( $response ) ) {
+            $status = wp_remote_retrieve_response_code( $response );
+            if ( 401 === $status ) {
+                return new \WP_Error( 'ava_connection_auth', self::authentication_failure( $settings, $response ) );
+            }
+            if ( 404 === $status ) {
+                $message = 'این پنل هنوز بررسی اتصال را پشتیبانی نمی‌کند؛ پنل آوا باید به‌روز شود.';
+            } elseif ( 429 === $status ) {
+                $message = 'سقف درخواست API پر شده است؛ کمی بعد اتصال را بررسی کنید.';
+            } elseif ( 403 === $status ) {
+                $message = 'دسترسی اتصال آوا مجاز نیست؛ وضعیت حساب و دامنهٔ پنل را بررسی کنید.';
+            } elseif ( 200 === $status ) {
+                $body = json_decode( wp_remote_retrieve_body( $response ), true );
+                $fields = array( 'authenticated', 'sms_send', 'sms_read', 'sms_account_ready', 'sms_service_ready' );
+                $valid = is_array( $body );
+                foreach ( $fields as $field ) {
+                    $valid = $valid && isset( $body[ $field ] ) && is_bool( $body[ $field ] );
+                }
+                if ( $valid && true === $body['authenticated'] ) {
+                    $issues = array();
+                    if ( ! $body['sms_send'] || ! $body['sms_read'] ) {
+                        $issues[] = 'کلید باید هر دو مجوز sms:send و sms:read را داشته باشد؛ کلید مناسب بسازید و در افزونه ذخیره کنید.';
+                    }
+                    if ( ! $body['sms_account_ready'] ) {
+                        $issues[] = 'حساب برای پیامک آماده نیست؛ وضعیت حساب یا نماینده را در پنل آوا بررسی کنید.';
+                    }
+                    if ( ! $body['sms_service_ready'] ) {
+                        $issues[] = 'اتصال پیامکی سرویس آوا آماده نیست؛ با پشتیبانی آوا پیگیری کنید.';
+                    }
+                    $message = $issues ? implode( ' ', $issues ) : 'کلید، مجوزهای ارسال و گزارش و آمادگی اتصال پیامکی تأیید شد. این بررسی پیامک نمی‌فرستد و هزینه ندارد؛ موجودی کافی، بررسی محتوا و نتیجهٔ تحویل هر پیام در گزارش آن مشخص می‌شود.';
+                    return self::remember_connection( $settings, $issues ? 'attention' : 'ready', $message );
+                }
+                $message = 'پاسخ بررسی اتصال معتبر نیست؛ نسخه و نشانی پنل آوا را بررسی کنید.';
+            }
+        }
+        self::remember_connection( $settings, 'unavailable', $message );
+        return new \WP_Error( 'ava_connection_unavailable', $message );
+    }
+
     /** Read only the current account wallet; never infer credit from send results. */
     public static function wallet( $refresh = false, $settings = null ) {
         $settings = null === $settings ? Settings::get() : $settings;
@@ -30,7 +127,7 @@ final class Api {
         if ( ! is_wp_error( $response ) ) {
             $status = wp_remote_retrieve_response_code( $response );
             if ( 401 === $status ) {
-                $result = new \WP_Error( 'ava_wallet_auth', 'کلید API نامعتبر یا منقضی است؛ کلید اتصال آوا را بررسی کنید.' );
+                $result = new \WP_Error( 'ava_wallet_auth', self::authentication_failure( $settings, $response ) );
             } elseif ( 403 === $status ) {
                 $result = new \WP_Error( 'ava_wallet_scope', 'کلید API اجازهٔ مشاهدهٔ موجودی ندارد؛ از کلید دارای مجوز sms:send یا wallet:read استفاده کنید.' );
             } elseif ( 429 === $status ) {
@@ -43,6 +140,7 @@ final class Api {
                     $body['balance_irr'] - $body['held_irr'] === $body['available_irr'] ) {
                     $result = array( 'balance_irr' => $body['balance_irr'], 'held_irr' => $body['held_irr'],
                         'available_irr' => $body['available_irr'], 'currency' => 'IRR', 'checked_at' => time() );
+                    self::clear_authentication_failure( $settings );
                 }
             }
         }
@@ -51,7 +149,7 @@ final class Api {
         return $result;
     }
 
-    public static function send( $phone, $text, $idempotency_key, $settings = null ) {
+    public static function send( $phone, $text, $idempotency_key, $settings = null, $template_context = null ) {
         $phone = Phone::normalize( $phone );
         if ( is_wp_error( $phone ) ) {
             return $phone;
@@ -61,10 +159,13 @@ final class Api {
             return $text;
         }
         if ( ! is_string( $idempotency_key ) || ! preg_match( '/^[A-Za-z0-9_-]{16,100}$/D', $idempotency_key ) ) {
-            return new \WP_Error( 'ava_idempotency', __( 'شناسهٔ یکتای ارسال معتبر نیست.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_idempotency', __( 'شناسهٔ یکتای ارسال معتبر نیست.', 'ava-sms-for-woocommerce' ) );
         }
         $settings = null === $settings ? Settings::get() : $settings;
         $payload = array( 'phone' => $phone, 'text' => $text );
+        if ( Template::valid_context( $template_context, $text ) ) {
+            $payload['woocommerce_template'] = Template::wire_context( $template_context );
+        }
         if ( '' !== $settings['sender'] ) {
             $payload['sender'] = $settings['sender'];
         }
@@ -73,7 +174,7 @@ final class Api {
 
     public static function report( $id, $settings = null ) {
         if ( ! is_string( $id ) || ! preg_match( '/^[A-Za-z0-9_-]{1,100}$/D', $id ) ) {
-            return new \WP_Error( 'ava_id', __( 'شناسهٔ پیامک معتبر نیست.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_id', __( 'شناسهٔ پیامک معتبر نیست.', 'ava-sms-for-woocommerce' ) );
         }
         return self::request( 'GET', '/api/v1/sms/' . rawurlencode( $id ), null, '', $settings );
     }
@@ -82,7 +183,7 @@ final class Api {
         $settings = null === $settings ? Settings::get() : $settings;
         $url = Settings::valid_url( $settings['api_url'] );
         if ( ! $url || ! preg_match( '/^ava_live_[A-Za-z0-9_-]{16,240}$/D', $settings['api_key'] ) ) {
-            return new \WP_Error( 'ava_configuration', __( 'نشانی یا کلید API آوا تنظیم نشده است.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_configuration', __( 'نشانی یا کلید API آوا تنظیم نشده است.', 'ava-sms-for-woocommerce' ) );
         }
         $args = array(
             'method' => $method, 'timeout' => 15, 'redirection' => 0, 'sslverify' => true,
@@ -99,8 +200,8 @@ final class Api {
         $response = wp_safe_remote_request( $url . $path, $args );
         if ( is_wp_error( $response ) ) {
             $message = 'POST' === $method
-                ? __( 'پاسخ سرویس دریافت نشد؛ وضعیت ارسال نامشخص است. برای جلوگیری از هزینهٔ تکراری ارسال خودکار تکرار نمی‌شود.', 'ava-woocommerce-plugin' )
-                : __( 'گزارش آوا دریافت نشد؛ وضعیت قبلی پیامک حفظ شد.', 'ava-woocommerce-plugin' );
+                ? __( 'پاسخ سرویس دریافت نشد؛ وضعیت ارسال نامشخص است. برای جلوگیری از هزینهٔ تکراری ارسال خودکار تکرار نمی‌شود.', 'ava-sms-for-woocommerce' )
+                : __( 'گزارش آوا دریافت نشد؛ وضعیت قبلی پیامک حفظ شد.', 'ava-sms-for-woocommerce' );
             return new \WP_Error( 'ava_transport', $message, array( 'uncertain' => 'POST' === $method ) );
         }
         $code = wp_remote_retrieve_response_code( $response );
@@ -114,16 +215,17 @@ final class Api {
                 422 => 'متن، شماره یا خط فرستنده معتبر نیست.',
                 429 => 'سقف درخواست API پر شده است؛ ارسال خودکار تکرار نمی‌شود.',
             );
-            $message = $messages[ $code ] ?? 'پاسخ سرویس آوا قابل تأیید نیست؛ گزارش پنل آوا را بررسی کنید.';
+            $message = 401 === $code ? self::authentication_failure( $settings, $response ) : ( $messages[ $code ] ?? 'پاسخ سرویس آوا قابل تأیید نیست؛ گزارش پنل آوا را بررسی کنید.' );
             return new \WP_Error( 'ava_http_' . $code, $message, array( 'status' => $code, 'uncertain' => 'POST' === $method && ( $code >= 500 || 408 === $code || ( $code >= 200 && $code < 400 ) ) ) );
         }
         $body = json_decode( wp_remote_retrieve_body( $response ), true );
         if ( ! is_array( $body ) || empty( $body['id'] ) || ! is_string( $body['id'] ) ||
              ! preg_match( '/^[A-Za-z0-9_-]{1,100}$/D', $body['id'] ) ||
              ! isset( $body['status'] ) || ! is_string( $body['status'] ) ) {
-            return new \WP_Error( 'ava_response', __( 'پاسخ آوا ساختار قابل تأیید ندارد؛ از ارسال مجدد خودکار جلوگیری شد.', 'ava-woocommerce-plugin' ), array( 'uncertain' => 'POST' === $method ) );
+            return new \WP_Error( 'ava_response', __( 'پاسخ آوا ساختار قابل تأیید ندارد؛ از ارسال مجدد خودکار جلوگیری شد.', 'ava-sms-for-woocommerce' ), array( 'uncertain' => 'POST' === $method ) );
         }
         $result = array( 'id' => $body['id'], 'status' => sanitize_key( $body['status'] ) );
+        self::clear_authentication_failure( $settings );
         foreach ( array( 'review_status', 'campaign_status', 'dispatch_state' ) as $field ) {
             if ( isset( $body[ $field ] ) && is_string( $body[ $field ] ) && preg_match( '/^[a-z0-9_-]{0,64}$/D', $body[ $field ] ) ) {
                 $result[ $field ] = $body[ $field ];

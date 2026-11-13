@@ -4,12 +4,17 @@ namespace AvaWoo;
 defined( 'ABSPATH' ) || exit;
 
 final class Queue {
-    const SCHEMA = '1.0.1';
+    const SCHEMA = '1.2.0';
     const GROUP = 'ava-woocommerce';
 
     public static function table() {
         global $wpdb;
         return $wpdb->prefix . 'ava_woo_messages';
+    }
+
+    /** Invalidate display-only snapshots; workers always read the database. */
+    public static function invalidate_log_cache() {
+        wp_cache_set_last_changed( 'ava_woo_logs' );
     }
 
     public static function install() {
@@ -24,6 +29,7 @@ final class Queue {
             audience varchar(16) NOT NULL,
             phone varchar(16) NOT NULL,
             message text NOT NULL,
+            template_context text NULL,
             api_url varchar(255) NOT NULL,
             key_fingerprint varchar(64) NOT NULL,
             sender varchar(64) NOT NULL DEFAULT '',
@@ -46,6 +52,7 @@ final class Queue {
             KEY report_due (report_due),
             KEY created_at (created_at)
         ) {$charset};" );
+        self::invalidate_log_cache();
         update_option( 'ava_woo_schema', self::SCHEMA, false );
         add_option( 'ava_woo_settings', Settings::defaults(), '', false );
         if ( ! wp_next_scheduled( 'ava_woo_housekeeping' ) ) {
@@ -85,7 +92,7 @@ final class Queue {
         return true;
     }
 
-    public static function enqueue( $phone, $message, $event_key, $order_id = 0, $audience = 'customer' ) {
+    public static function enqueue( $phone, $message, $event_key, $order_id = 0, $audience = 'customer', $template_context = null ) {
         global $wpdb;
         $phone = Phone::normalize( $phone );
         if ( is_wp_error( $phone ) ) {
@@ -96,35 +103,40 @@ final class Queue {
             return $message;
         }
         if ( ! is_string( $event_key ) || '' === $event_key || ! in_array( $audience, array( 'customer', 'admin', 'test', 'manual' ), true ) ) {
-            return new \WP_Error( 'ava_event', __( 'رویداد پیامک معتبر نیست.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_event', __( 'رویداد پیامک معتبر نیست.', 'ava-sms-for-woocommerce' ) );
         }
         $settings = Settings::get();
         if ( in_array( $audience, array( 'customer', 'admin' ), true ) && 'yes' !== $settings['enabled'] ) {
-            return new \WP_Error( 'ava_disabled', __( 'ارسال خودکار خاموش است.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_disabled', __( 'ارسال خودکار خاموش است.', 'ava-sms-for-woocommerce' ) );
         }
         $url = Settings::valid_url( $settings['api_url'] );
         if ( ! $url || ! preg_match( '/^ava_live_[A-Za-z0-9_-]{16,240}$/D', $settings['api_key'] ) ) {
-            return new \WP_Error( 'ava_configuration', __( 'ابتدا نشانی و کلید API آوا را ذخیره کنید.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_configuration', __( 'ابتدا نشانی و کلید API آوا را ذخیره کنید.', 'ava-sms-for-woocommerce' ) );
         }
         $table = self::table();
         // A random key per store prevents request-key collisions between separate shops.
-        $store_id = get_option( 'ava_woo_store_id' );
-        if ( ! $store_id ) {
-            add_option( 'ava_woo_store_id', wp_generate_uuid4(), '', false );
-            $store_id = get_option( 'ava_woo_store_id' );
+        $store_id = Template::store_id();
+        if ( null === $template_context && 'test' === $audience ) {
+            $template_context = Template::context( $message, null, 'test' );
         }
+        $context_json = Template::valid_context( $template_context, $message ) ? wp_json_encode( Template::wire_context( $template_context ), JSON_UNESCAPED_UNICODE ) : '';
         $key = hash( 'sha256', $store_id . '|' . $event_key );
         $now = current_time( 'mysql', true );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Atomic INSERT IGNORE prevents duplicate sends in this custom table; successful writes invalidate log snapshots below.
         $inserted = $wpdb->query( $wpdb->prepare(
-            "INSERT IGNORE INTO {$table} (event_key,order_id,audience,phone,message,api_url,key_fingerprint,sender,status,detail,created_at,updated_at) VALUES (%s,%d,%s,%s,%s,%s,%s,%s,'pending','',%s,%s)",
-            $key, absint( $order_id ), $audience, $phone, $message, $url, hash( 'sha256', $settings['api_key'] ), $settings['sender'], $now, $now
+            "INSERT IGNORE INTO %i (event_key,order_id,audience,phone,message,template_context,api_url,key_fingerprint,sender,status,detail,created_at,updated_at) VALUES (%s,%d,%s,%s,%s,%s,%s,%s,%s,'pending','',%s,%s)",
+            $table, $key, absint( $order_id ), $audience, $phone, $message, $context_json, $url, hash( 'sha256', $settings['api_key'] ), $settings['sender'], $now, $now
         ) );
         if ( false === $inserted ) {
-            return new \WP_Error( 'ava_storage', __( 'ذخیره در صف پیامک ناموفق بود.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_storage', __( 'ذخیره در صف پیامک ناموفق بود.', 'ava-sms-for-woocommerce' ) );
         }
-        $id = (int) $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE event_key = %s", $key ) );
+        if ( 1 === $inserted ) {
+            self::invalidate_log_cache();
+        }
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- The deduplication result must come from the unique database key, never a potentially stale cache.
+        $id = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM %i WHERE event_key = %s', $table, $key ) );
         if ( ! $id ) {
-            return new \WP_Error( 'ava_storage', __( 'شناسهٔ صف پیامک پیدا نشد.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_storage', __( 'شناسهٔ صف پیامک پیدا نشد.', 'ava-sms-for-woocommerce' ) );
         }
         if ( 1 === $inserted ) {
             self::schedule( 'ava_woo_send', array( $id ) );
@@ -137,11 +149,14 @@ final class Queue {
         $id = absint( $id );
         $table = self::table();
         // Only one worker can enter the send path, even with concurrent cron requests.
-        $claimed = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET status = 'processing', updated_at = %s WHERE id = %d AND status = 'pending'", current_time( 'mysql', true ), $id ) );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A database compare-and-set is required to claim this custom-table job; invalidate display snapshots after success.
+        $claimed = $wpdb->query( $wpdb->prepare( "UPDATE %i SET status = 'processing', updated_at = %s WHERE id = %d AND status = 'pending'", $table, current_time( 'mysql', true ), $id ) );
         if ( 1 !== $claimed ) {
             return;
         }
-        $job = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $id ) );
+        self::invalidate_log_cache();
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- A claimed worker needs the current custom-table payload and account snapshot before sending.
+        $job = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM %i WHERE id = %d', $table, $id ) );
         if ( ! $job ) {
             return;
         }
@@ -154,7 +169,8 @@ final class Queue {
             self::update( $id, array( 'status' => 'cancelled', 'detail' => 'تنظیمات اتصال یا خط فرستنده پس از ثبت در صف تغییر کرد؛ پیامک ارسال نشد.' ) );
             return;
         }
-        $result = Api::send( $job->phone, $job->message, $job->event_key, $settings );
+        $context = ! empty( $job->template_context ) ? json_decode( $job->template_context, true ) : null;
+        $result = Api::send( $job->phone, $job->message, $job->event_key, $settings, $context );
         if ( is_wp_error( $result ) ) {
             $data = $result->get_error_data();
             self::update( $id, array( 'status' => ! empty( $data['uncertain'] ) ? 'unknown' : 'failed', 'detail' => $result->get_error_message() ) );
@@ -229,26 +245,31 @@ final class Queue {
     private static function update( $id, $values ) {
         global $wpdb;
         $values['updated_at'] = current_time( 'mysql', true );
-        $wpdb->update( self::table(), $values, array( 'id' => $id ) );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- wpdb updates this plugin-owned queue table; successful mutations invalidate display snapshots.
+        $updated = $wpdb->update( self::table(), $values, array( 'id' => $id ) );
+        if ( false !== $updated && $updated > 0 ) {
+            self::invalidate_log_cache();
+        }
     }
 
     public static function refresh( $id ) {
         global $wpdb;
         $table = self::table();
-        $job = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", absint( $id ) ) );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Reporting must verify the live provider ID and original account before any authenticated request.
+        $job = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM %i WHERE id = %d', $table, absint( $id ) ) );
         if ( ! $job || '' === $job->provider_id ) {
-            return new \WP_Error( 'ava_no_report', __( 'شناسهٔ آوا برای این پیامک در دسترس نیست؛ گزارش پنل آوا را بررسی کنید.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_no_report', __( 'شناسهٔ آوا برای این پیامک در دسترس نیست؛ گزارش پنل آوا را بررسی کنید.', 'ava-sms-for-woocommerce' ) );
         }
         $settings = Settings::get();
         if ( ! self::same_account( $job, $settings ) ) {
-            return new \WP_Error( 'ava_account_changed', __( 'اتصال آوا تغییر کرده است؛ گزارش را در حساب اولیهٔ آوا بررسی کنید.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_account_changed', __( 'اتصال آوا تغییر کرده است؛ گزارش را در حساب اولیهٔ آوا بررسی کنید.', 'ava-sms-for-woocommerce' ) );
         }
         $report = Api::report( $job->provider_id, $settings );
         if ( is_wp_error( $report ) ) {
             return $report;
         }
         if ( $report['id'] !== $job->provider_id ) {
-            return new \WP_Error( 'ava_report_mismatch', __( 'شناسهٔ گزارش آوا با پیامک مطابقت ندارد.', 'ava-woocommerce-plugin' ) );
+            return new \WP_Error( 'ava_report_mismatch', __( 'شناسهٔ گزارش آوا با پیامک مطابقت ندارد.', 'ava-sms-for-woocommerce' ) );
         }
         $values = self::report_values( $report );
         $report['status'] = $values['status'];
@@ -261,7 +282,8 @@ final class Queue {
 
     public static function poll( $id, $attempt = 0 ) {
         global $wpdb;
-        $job = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table() . ' WHERE id = %d', absint( $id ) ) );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Cached status or poll generations could schedule obsolete work; read the live custom-table row.
+        $job = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM %i WHERE id = %d', self::table(), absint( $id ) ) );
         if ( ! $job || '' === $job->provider_id || self::terminal( $job->status ) ) {
             return;
         }
@@ -280,17 +302,24 @@ final class Queue {
         global $wpdb;
         $table = self::table();
         // A killed worker may already have sent. Mark unknown, never send it again.
-        $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET status = 'unknown', detail = %s, updated_at = %s WHERE status = 'processing' AND updated_at < %s",
-            'اجرای قبلی کامل نشد؛ وضعیت نامشخص است و ارسال تکرار نمی‌شود.', current_time( 'mysql', true ), gmdate( 'Y-m-d H:i:s', time() - 10 * MINUTE_IN_SECONDS ) ) );
-        $pending = $wpdb->get_col( "SELECT id FROM {$table} WHERE status = 'pending' ORDER BY id ASC LIMIT 100" );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Recovery atomically expires abandoned claims in the custom table and invalidates display snapshots.
+        $expired = $wpdb->query( $wpdb->prepare( "UPDATE %i SET status = 'unknown', detail = %s, updated_at = %s WHERE status = 'processing' AND updated_at < %s",
+            $table, 'اجرای قبلی کامل نشد؛ وضعیت نامشخص است و ارسال تکرار نمی‌شود.', current_time( 'mysql', true ), gmdate( 'Y-m-d H:i:s', time() - 10 * MINUTE_IN_SECONDS ) ) );
+        if ( false !== $expired && $expired > 0 ) {
+            self::invalidate_log_cache();
+        }
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Recovery must inspect current pending jobs, not cached scheduling state.
+        $pending = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM %i WHERE status = 'pending' ORDER BY id ASC LIMIT 100", $table ) );
         foreach ( $pending as $id ) {
             self::schedule( 'ava_woo_send', array( (int) $id ) );
         }
         // Restore lost report actions, including jobs admitted by earlier versions.
         // Each batch is bounded; only read-only GET requests are scheduled here.
-        $reports = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE provider_id != '' AND status NOT IN ('delivered','undelivered','rejected','blocked','cancelled','simulated','expired','failed') AND report_due <= %d ORDER BY report_due ASC, id ASC LIMIT 100", time() ) );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Due report IDs must reflect the current terminal status and deadline in this custom table.
+        $reports = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM %i WHERE provider_id != '' AND status NOT IN ('delivered','undelivered','rejected','blocked','cancelled','simulated','expired','failed') AND report_due <= %d ORDER BY report_due ASC, id ASC LIMIT 100", $table, time() ) );
         foreach ( $reports as $id ) {
-            $job = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", (int) $id ) );
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Another worker may have advanced this report generation since the preceding lookup.
+            $job = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM %i WHERE id = %d', $table, (int) $id ) );
             if ( $job ) {
                 self::schedule_report( $id, (int) $job->report_attempts, 1 );
             }
@@ -303,6 +332,10 @@ final class Queue {
         $settings = Settings::get();
         $days = max( 1, min( 90, absint( $settings['retention_days'] ) ) );
         $table = self::table();
-        $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE created_at < %s AND status IN ('delivered','undelivered','rejected','blocked','cancelled','simulated','expired','failed')", gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Delete only finalized custom-table records past retention; invalidate display snapshots after deletion.
+        $deleted = $wpdb->query( $wpdb->prepare( "DELETE FROM %i WHERE created_at < %s AND status IN ('delivered','undelivered','rejected','blocked','cancelled','simulated','expired','failed')", $table, gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) );
+        if ( false !== $deleted && $deleted > 0 ) {
+            self::invalidate_log_cache();
+        }
     }
 }

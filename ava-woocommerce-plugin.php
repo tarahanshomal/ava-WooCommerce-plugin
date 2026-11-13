@@ -1,15 +1,14 @@
 <?php
 /**
- * Plugin Name: Ava WooCommerce SMS
+ * Plugin Name: Ava SMS for WooCommerce
  * Plugin URI: https://github.com/tarahanshomal/ava-WooCommerce-plugin
- * Description: اطلاع‌رسانی پیامکی سفارش‌های ووکامرس با سرویس آوا؛ قالب فارسی، ارسال غیرهم‌زمان و گزارش وضعیت.
- * Version: 1.1.0
+ * Description: Send WooCommerce order SMS through Ava, with editable templates, background processing and delivery reports.
+ * Version: 1.2.3
  * Author: طراحان شمال
- * Author URI: https://github.com/tarahanshomal
+ * Author URI: https://profiles.wordpress.org/tarahanshomal/
  * License: GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
- * Text Domain: ava-woocommerce-plugin
- * Domain Path: /languages
+ * Text Domain: ava-sms-for-woocommerce
  * Requires at least: 6.5
  * Requires PHP: 7.4
  * Requires Plugins: woocommerce
@@ -19,7 +18,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'AVA_WOO_VERSION', '1.1.0' );
+define( 'AVA_WOO_VERSION', '1.2.3' );
 define( 'AVA_WOO_FILE', __FILE__ );
 define( 'AVA_WOO_PATH', plugin_dir_path( __FILE__ ) );
 
@@ -42,7 +41,7 @@ add_action( 'plugins_loaded', static function () {
     if ( ! class_exists( 'WooCommerce' ) || version_compare( WC_VERSION, '8.2', '<' ) ) {
         add_action( 'admin_notices', static function () {
             if ( current_user_can( 'activate_plugins' ) ) {
-                echo '<div class="notice notice-warning"><p>' . esc_html__( 'پیامک آوا به ووکامرس نسخهٔ ۸٫۲ یا جدیدتر نیاز دارد.', 'ava-woocommerce-plugin' ) . '</p></div>';
+                echo '<div class="notice notice-warning"><p>' . esc_html__( 'پیامک آوا به ووکامرس نسخهٔ ۸٫۲ یا جدیدتر نیاز دارد.', 'ava-sms-for-woocommerce' ) . '</p></div>';
             }
         } );
         return;
@@ -55,6 +54,6 @@ add_action( 'plugins_loaded', static function () {
 } );
 
 add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), static function ( $links ) {
-    array_unshift( $links, '<a href="' . esc_url( admin_url( 'admin.php?page=ava-woo-sms' ) ) . '">' . esc_html__( 'تنظیمات', 'ava-woocommerce-plugin' ) . '</a>' );
+    array_unshift( $links, '<a href="' . esc_url( admin_url( 'admin.php?page=ava-woo-sms' ) ) . '">' . esc_html__( 'تنظیمات', 'ava-sms-for-woocommerce' ) . '</a>' );
     return $links;
 } );

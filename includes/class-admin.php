@@ -18,6 +18,8 @@ final class Admin {
 		add_action( 'admin_post_ava_woo_manual', array( __CLASS__, 'manual_send' ) );
 		add_action( 'admin_post_ava_woo_refresh', array( __CLASS__, 'refresh' ) );
 		add_action( 'admin_post_ava_woo_wallet_refresh', array( __CLASS__, 'wallet_refresh' ) );
+		add_action( 'admin_post_ava_woo_connection', array( __CLASS__, 'connection_check' ) );
+		add_action( 'admin_notices', array( __CLASS__, 'connection_notice' ) );
 		add_action( 'add_meta_boxes', array( __CLASS__, 'metabox' ) );
 	}
 
@@ -42,7 +44,7 @@ final class Admin {
 
 	private static function authorize( $nonce ) {
 		if ( ! current_user_can( 'manage_woocommerce' ) ) {
-			wp_die( esc_html__( 'اجازهٔ مدیریت پیامک‌های آوا را ندارید.', 'ava-woocommerce-plugin' ), '', array( 'response' => 403 ) );
+			wp_die( esc_html__( 'اجازهٔ مدیریت پیامک‌های آوا را ندارید.', 'ava-sms-for-woocommerce' ), '', array( 'response' => 403 ) );
 		}
 		check_admin_referer( $nonce );
 	}
@@ -52,7 +54,9 @@ final class Admin {
 	}
 
 	private static function posted( $name ) {
-		return isset( $_POST[ $name ] ) && is_scalar( $_POST[ $name ] ) ? wp_unslash( (string) $_POST[ $name ] ) : '';
+		// State-changing callers verify their action-specific nonce through authorize().
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Verification is performed by the caller before mutation.
+		return isset( $_POST[ $name ] ) && is_scalar( $_POST[ $name ] ) ? sanitize_textarea_field( wp_unslash( (string) $_POST[ $name ] ) ) : '';
 	}
 
 	private static function request_id() {
@@ -111,10 +115,30 @@ final class Admin {
 		self::finish( is_wp_error( $result ) ? $result : 'موجودی حساب آوا تازه‌سازی شد.', 'settings' );
 	}
 
+	public static function connection_check() {
+		self::authorize( 'ava_woo_connection' );
+		$result = Api::connection();
+		if ( ! is_wp_error( $result ) ) {
+			$result = 'ready' === $result['state'] ? $result['message'] : new \WP_Error( 'ava_connection_attention', $result['message'] );
+		}
+		self::finish( $result, 'settings' );
+	}
+
+	public static function connection_notice() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return;
+		}
+		$status = Api::connection_snapshot();
+		if ( is_array( $status ) && 'authentication_failed' === ( $status['state'] ?? '' ) ) {
+			echo '<div class="notice notice-error"><p>' . esc_html( $status['message'] ) . ' <a href="' . esc_url( self::url() ) . '">تنظیمات پیامک آوا</a></p></div>';
+		}
+	}
+
 	public static function page() {
 		if ( ! current_user_can( 'manage_woocommerce' ) ) {
 			return;
 		}
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only tab selection; no state change.
 		$tab = isset( $_GET['tab'] ) && is_string( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : 'settings';
 		if ( ! in_array( $tab, array( 'settings', 'send', 'logs' ), true ) ) {
 			$tab = 'settings';
@@ -162,12 +186,14 @@ final class Admin {
 	private static function settings_form( $s ) {
 		$statuses = wc_get_order_statuses();
 		self::wallet_card( $s );
+		self::connection_card( $s );
 		?>
 		<form method="post" action="<?php echo esc_url( admin_url( 'options.php' ) ); ?>">
 			<?php settings_fields( 'ava_woo' ); ?>
 			<section class="ava-woo-card">
 				<h2>اتصال فروشگاه به آوا</h2>
 				<p class="description">از پنل آوا یک کلید با دسترسی‌های <code>sms:send</code> و <code>sms:read</code> بسازید و اینجا وارد کنید.</p>
+				<p class="description">پس از بازیابی رمز یا تغییر امنیتی حساب آوا، کلید باطل‌شده را با کلید تازه جایگزین کنید و اتصال را دوباره بررسی کنید.</p>
 				<table class="form-table" role="presentation"><tbody>
 					<tr><th scope="row">ارسال خودکار</th><td><input type="hidden" name="ava_woo_settings[enabled]" value="no"><?php self::checkbox( 'enabled', $s['enabled'], 'اعلان‌های انتخاب‌شده برای سفارش‌های جدید ارسال شوند' ); ?><p class="description">پس از ذخیرهٔ اتصال و بررسی پیامک آزمایشی، این گزینه را فعال کنید.</p></td></tr>
 					<tr><th scope="row"><label for="ava-api-url">نشانی پنل آوا</label></th><td><input id="ava-api-url" class="regular-text code" dir="ltr" type="url" name="ava_woo_settings[api_url]" value="<?php echo esc_attr( $s['api_url'] ); ?>" required><p class="description">نشانی HTTPS پنل، بدون مسیر <code>/api/v1</code>؛ برای پنل نمایندگی از دامنهٔ همان پنل استفاده کنید.</p></td></tr>
@@ -187,6 +213,7 @@ final class Admin {
 			<section class="ava-woo-card">
 				<h2>وضعیت سفارش و متن پیامک</h2>
 				<p>گیرندگان هر وضعیت را انتخاب کنید و متن پیامک مشتری را بنویسید. پیامک مدیر از قالب پیامک مدیر در بخش بالا استفاده می‌کند. متغیرها هنگام ارسال با اطلاعات سفارش جایگزین می‌شوند.</p>
+				<p class="description">قالب سفارشی پس از یک‌بار تأیید در آوا برای همین فروشگاه و همین نسخه استفاده می‌شود؛ تغییر نام مشتری، شماره سفارش و مبلغ، تأیید تازه نمی‌خواهد. با ویرایش متن قالب، تأیید دوباره لازم است. قالب‌ها و متغیرهای خارج از محدودهٔ پشتیبانی، مسیر بررسی معمول را دارند.</p>
 				<div class="ava-woo-tokens" dir="ltr"><?php foreach ( array( 'order_number', 'order_id', 'order_status', 'order_total', 'currency', 'billing_first_name', 'billing_last_name', 'billing_phone', 'payment_method', 'shipping_method', 'site_name' ) as $token ) : ?><code><?php echo esc_html( '{' . $token . '}' ); ?></code> <?php endforeach; ?></div>
 				<input type="hidden" name="ava_woo_settings[customer_statuses][]" value=""><input type="hidden" name="ava_woo_settings[admin_statuses][]" value="">
 				<?php foreach ( $statuses as $status_key => $status_label ) : $status = preg_replace( '/^wc-/', '', $status_key ); ?>
@@ -202,6 +229,25 @@ final class Admin {
 			</section>
 			<?php submit_button( 'ذخیرهٔ تنظیمات' ); ?>
 		</form>
+		<?php
+	}
+
+	private static function connection_card( $s ) {
+		$status = Api::connection_snapshot( $s );
+		$origin = Settings::valid_url( $s['api_url'] );
+		?>
+		<section class="ava-woo-card" aria-labelledby="ava-woo-connection-title">
+			<h2 id="ava-woo-connection-title">بررسی اتصال فروشگاه</h2>
+			<?php if ( is_array( $status ) && isset( $status['message'], $status['checked_at'] ) ) : ?>
+				<p role="status"><?php echo esc_html( $status['message'] ); ?></p>
+				<p class="description">آخرین بررسی: <?php echo esc_html( wp_date( 'Y/m/d H:i:s', $status['checked_at'] ) ); ?></p>
+			<?php else : ?>
+				<p>پس از ذخیرهٔ تنظیمات، اعتبار کلید، مجوزهای ارسال و گزارش و آمادگی سرویس را بررسی کنید.</p>
+			<?php endif; ?>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"><input type="hidden" name="action" value="ava_woo_connection"><?php wp_nonce_field( 'ava_woo_connection' ); ?><button type="submit" class="button">بررسی اتصال بدون ارسال پیامک</button></form>
+			<?php if ( $origin ) : ?><p><a href="<?php echo esc_url( $origin . '/panel#developers' ); ?>" target="_blank" rel="noopener noreferrer">اتصال و کلیدهای API در پنل آوا</a></p><?php endif; ?>
+			<p class="description">این بررسی هزینه ندارد. پیامک‌های قبلی، از جمله ارسال‌های با نتیجهٔ نامشخص، خودکار تکرار نمی‌شوند.</p>
+		</section>
 		<?php
 	}
 
@@ -230,6 +276,7 @@ final class Admin {
 	}
 
 	private static function send_form() {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only form context; submission verifies a separate nonce.
 		$order_id = isset( $_GET['order_id'] ) && is_scalar( $_GET['order_id'] ) ? absint( $_GET['order_id'] ) : 0;
 		$order = $order_id ? wc_get_order( $order_id ) : false;
 		if ( $order_id && ! ( $order instanceof \WC_Order ) ) {
@@ -276,25 +323,52 @@ final class Admin {
 	private static function logs() {
 		global $wpdb;
 		$table = Queue::table();
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only log pagination.
 		$page = isset( $_GET['paged'] ) && is_scalar( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only log filter, validated against the allowlist below.
 		$filter = isset( $_GET['status'] ) && is_string( $_GET['status'] ) ? sanitize_key( wp_unslash( $_GET['status'] ) ) : '';
 			$allowed = array( '', 'pending', 'processing', 'awaiting_review', 'awaiting_dispatch', 'awaiting_start', 'credit_blocked', 'waiting_capacity', 'awaiting_configuration', 'dispatch_blocked', 'paused', 'scheduled', 'queued', 'sending', 'accepted', 'sent', 'delivered', 'undelivered', 'failed', 'unknown', 'rejected', 'blocked', 'cancelled', 'simulated', 'expired' );
 		if ( ! in_array( $filter, $allowed, true ) ) {
 			$filter = '';
 		}
-		// The table identifier comes exclusively from wpdb's prefix and Queue::table().
-		if ( $filter ) {
-			$total = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE status = %s", $filter ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		} else {
-			$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// Capture one generation before reading: a concurrent mutation invalidates
+		// both caches without allowing an older in-flight read into the new generation.
+		$last_changed = wp_cache_get_last_changed( 'ava_woo_logs' );
+		$count_key = 'count:' . md5( $table . '|' . $filter ) . ':' . $last_changed;
+		$total = wp_cache_get( $count_key, 'ava_woo_logs', false, $count_found );
+		if ( ! $count_found ) {
+			// The custom queue table has no corresponding WordPress data API.
+			if ( $filter ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Prepared custom-table read, cached below and invalidated by queue mutations.
+				$total = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i WHERE status = %s", $table, $filter ) );
+			} else {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Prepared custom-table read, cached below and invalidated by queue mutations.
+				$total = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM %i", $table ) );
+			}
+			if ( ! empty( $wpdb->last_error ) ) {
+				self::log_load_error();
+				return;
+			}
+			wp_cache_set( $count_key, $total, 'ava_woo_logs', 60 );
 		}
 		$pages = max( 1, (int) ceil( $total / 20 ) );
 		$page = min( $page, $pages );
 		$offset = ( $page - 1 ) * 20;
-		if ( $filter ) {
-			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE status = %s ORDER BY id DESC LIMIT %d OFFSET %d", $filter, 20, $offset ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		} else {
-			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} ORDER BY id DESC LIMIT %d OFFSET %d", 20, $offset ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$rows_key = 'rows:' . md5( $table . '|' . $filter . '|' . $page . '|' . $offset ) . ':' . $last_changed;
+		$rows = wp_cache_get( $rows_key, 'ava_woo_logs', false, $rows_found );
+		if ( ! $rows_found ) {
+			if ( $filter ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Prepared custom-table read, cached below and invalidated by queue mutations.
+				$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM %i WHERE status = %s ORDER BY id DESC LIMIT %d OFFSET %d", $table, $filter, 20, $offset ) );
+			} else {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Prepared custom-table read, cached below and invalidated by queue mutations.
+				$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM %i ORDER BY id DESC LIMIT %d OFFSET %d", $table, 20, $offset ) );
+			}
+			if ( ! empty( $wpdb->last_error ) ) {
+				self::log_load_error();
+				return;
+			}
+			wp_cache_set( $rows_key, $rows, 'ava_woo_logs', 60 );
 		}
 		?>
 		<section class="ava-woo-card">
@@ -315,6 +389,10 @@ final class Admin {
 			<?php if ( $pages > 1 ) : ?><div class="tablenav"><div class="tablenav-pages"><?php echo wp_kses_post( paginate_links( array( 'base' => add_query_arg( 'paged', '%#%', self::url( 'logs', array( 'status' => $filter ) ) ), 'format' => '', 'current' => $page, 'total' => $pages, 'prev_text' => 'قبلی', 'next_text' => 'بعدی' ) ) ); ?></div></div><?php endif; ?>
 		</section>
 		<?php
+	}
+
+	private static function log_load_error() {
+		echo '<section class="ava-woo-card"><p role="alert">' . esc_html__( 'گزارش پیامک‌ها بارگذاری نشد؛ کمی بعد دوباره تلاش کنید.', 'ava-sms-for-woocommerce' ) . '</p></section>';
 	}
 
 	public static function metabox() {
