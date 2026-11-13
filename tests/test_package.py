@@ -32,7 +32,7 @@ class PackageTest(unittest.TestCase):
             self.assertEqual(first.read_bytes(), second.read_bytes())
             with zipfile.ZipFile(first) as archive:
                 self.assertEqual(archive.testzip(), None)
-                self.assertEqual(archive.namelist(), ["ava-WooCommerce-plugin/LICENSE", "ava-WooCommerce-plugin/ava-woocommerce-plugin.php", "ava-WooCommerce-plugin/includes/class-api.php", "ava-WooCommerce-plugin/readme.txt"])
+                self.assertEqual(archive.namelist(), ["ava-sms-for-woocommerce/LICENSE", "ava-sms-for-woocommerce/ava-woocommerce-plugin.php", "ava-sms-for-woocommerce/includes/class-api.php", "ava-sms-for-woocommerce/readme.txt"])
 
     def test_refuses_symlink_in_production_tree(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -50,6 +50,21 @@ class PackageTest(unittest.TestCase):
             (root / "ava-woocommerce-plugin.php").write_text("<?php\n")
             with self.assertRaises(ValueError):
                 package.version(root)
+
+    def test_legacy_upgrade_preserves_original_plugin_directory_and_allowlist(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.fixture(root)
+            (root / "secrets.env").write_text("never-ship")
+            canonical, legacy = root / "canonical.zip", root / "legacy.zip"
+            package.build(canonical, root)
+            package.build(legacy, root, slug=package.LEGACY_SLUG)
+            with zipfile.ZipFile(canonical) as first, zipfile.ZipFile(legacy) as second:
+                self.assertTrue(all(name.startswith("ava-WooCommerce-plugin/") for name in second.namelist()))
+                self.assertEqual([name.split("/", 1)[1] for name in first.namelist()], [name.split("/", 1)[1] for name in second.namelist()])
+                self.assertEqual([first.read(name) for name in first.namelist()], [second.read(name) for name in second.namelist()])
+            with self.assertRaises(ValueError):
+                package.build(root / "bad.zip", root, slug="unreviewed-directory")
 
 
 if __name__ == "__main__":

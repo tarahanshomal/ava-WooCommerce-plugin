@@ -57,7 +57,7 @@ final class Settings {
         if ( $url ) {
             $out['api_url'] = $url;
         } else {
-            add_settings_error( 'ava_woo_settings', 'ava_url', __( 'نشانی آوا باید فقط دامنه با HTTPS باشد؛ نشانی قبلی حفظ شد.', 'ava-woocommerce-plugin' ) );
+            add_settings_error( 'ava_woo_settings', 'ava_url', __( 'نشانی آوا باید فقط دامنه با HTTPS باشد؛ نشانی قبلی حفظ شد.', 'ava-sms-for-woocommerce' ) );
         }
         if ( ! defined( 'AVA_WOO_API_KEY' ) ) {
             if ( ! empty( $input['delete_api_key'] ) ) {
@@ -67,7 +67,7 @@ final class Settings {
                 if ( preg_match( '/^ava_live_[A-Za-z0-9_-]{16,240}$/D', $key ) ) {
                     $out['api_key'] = $key;
                 } else {
-                    add_settings_error( 'ava_woo_settings', 'ava_key', __( 'ساختار کلید API آوا معتبر نیست؛ کلید قبلی حفظ شد.', 'ava-woocommerce-plugin' ) );
+                    add_settings_error( 'ava_woo_settings', 'ava_key', __( 'ساختار کلید API آوا معتبر نیست؛ کلید قبلی حفظ شد.', 'ava-sms-for-woocommerce' ) );
                 }
             }
         } else {
@@ -84,7 +84,7 @@ final class Settings {
         foreach ( $phones as $phone ) {
             $valid = Phone::normalize( $phone );
             if ( is_wp_error( $valid ) ) {
-                add_settings_error( 'ava_woo_settings', 'ava_admin_phone', __( 'یک شمارهٔ مدیر نامعتبر بود و ذخیره نشد.', 'ava-woocommerce-plugin' ) );
+                add_settings_error( 'ava_woo_settings', 'ava_admin_phone', __( 'یک شمارهٔ مدیر نامعتبر بود و ذخیره نشد.', 'ava-sms-for-woocommerce' ) );
             } else {
                 $normalized[] = $valid;
             }
@@ -101,7 +101,7 @@ final class Settings {
                 if ( ! is_wp_error( Template::validate( $text ) ) ) {
                     $out['templates'][ $status ] = $text;
                 } else {
-                    add_settings_error( 'ava_woo_settings', 'ava_template_' . $status, __( 'قالب باید بین ۱ و ۱۰۰۰ نویسه باشد؛ قالب قبلی حفظ شد.', 'ava-woocommerce-plugin' ) );
+                    add_settings_error( 'ava_woo_settings', 'ava_template_' . $status, __( 'قالب باید بین ۱ و ۱۰۰۰ نویسه باشد؛ قالب قبلی حفظ شد.', 'ava-sms-for-woocommerce' ) );
                 }
             }
         }
@@ -111,6 +111,7 @@ final class Settings {
                 $out['admin_template'] = $text;
             }
         }
+        Template::settings_changed( $out );
         return $out;
     }
 }
